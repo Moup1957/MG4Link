@@ -564,106 +564,145 @@ class MainActivity : Activity() {
             g.writeDescriptor(cccd)
         }
 
-  name: Construire MG4 Link
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-permissions:
-  contents: write
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-      - name: Accepter les licences Android
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-      - name: Compiler
-        run: gradle assembleDebug --no-daemon --stacktrace
-      - name: Publier l'APK
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cp app/build/outputs/apk/debug/app-debug.apk MG4Link.apk
-          gh release create "v0.3-build${{ github.run_number }}" MG4Link.apk --repo "${{ github.repository }}" --title "MG4 Link v0.3 (build ${{ github.run_number }})" --notes "Compilation depuis les sources du dépôt" --clobber<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+        override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, st: Int) {
+            log("Notifications activées (code $st)")
+            thread(name = "init") { initElm() }
+        }
 
-    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <uses-permission android:name="android.permission.INTERNET" />
+        // Android 13 et plus
+        override fun onCharacteristicChanged(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            elm.onData(value)
+        }
 
-    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+        // Android 12 et moins
+        @Deprecated("Deprecated in Java")
+        override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            if (Build.VERSION.SDK_INT < 33) {
+                val v = characteristic.value
+                if (v != null) elm.onData(v)
+            }
+        }
+    }
 
-    <application
-        android:allowBackup="false"
-        android:label="MG4 Link"
-        android:theme="@android:style/Theme.Material.NoActionBar">
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:screenOrientation="portrait">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-    </application>
+    // --------------------------------------------------------------- ELM327
 
-</manifest>plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    private fun initElm() {
+        try {
+            status("Initialisation du dongle...")
+            for (cmd in listOf("ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATSP0")) {
+                val r = elm.request(cmd, if (cmd == "ATZ") 5000L else 3000L)
+                log("> $cmd\n$r")
+            }
+            log("> ATRV\n" + elm.request("ATRV", 3000))
+            log("> 0100 (détection du protocole, peut durer quelques secondes)\n" + elm.request("0100", 12000))
+            log("> ATDP\n" + elm.request("ATDP", 3000))
+            ready = true
+            status("Prêt - dongle connecté")
+            log("Initialisation terminée.")
+        } catch (e: Exception) {
+            log("Erreur d'initialisation : ${e.message}")
+        }
+    }
+
+    private fun hexAfter(resp: String, prefix: String, bytes: Int): List<Int>? {
+        val s = resp.replace(" ", "").replace("\n", "").uppercase(Locale.ROOT)
+        val i = s.indexOf(prefix)
+        if (i < 0) return null
+        val start = i + prefix.length
+        if (s.length < start + 2 * bytes) return null
+        return try {
+            (0 until bytes).map { s.substring(start + 2 * it, start + 2 * it + 2).toInt(16) }
+        } catch (e: NumberFormatException) {
+            null
+        }
+    }
+
+    private fun setLive(on: Boolean) {
+        liveOn = on
+        if (!on) return
+        if (liveThread?.isAlive == true) return
+        liveThread = thread(name = "live") {
+            while (liveOn) {
+                try {
+                    if (ready) {
+                        val s = elm.request("010D", 2500)
+                        val b = hexAfter(s, "410D", 1)
+                        obdSpeed = if (b != null) "${b[0]} km/h" else "pas de réponse ($s)"
+                        volt = elm.request("ATRV", 2500)
+                        val s5 = hexAfter(elm.request("015B", 2500), "415B", 1)
+                        soc = if (s5 != null) "%.1f".format(s5[0] * 100.0 / 255.0) + " %" else "pas de réponse"
+                        val so = hexAfter(elm.request("01A6", 2500), "41A6", 4)
+                        odo = if (so != null) {
+                            val raw = (so[0].toLong() shl 24) or (so[1].toLong() shl 16) or
+                                (so[2].toLong() shl 8) or so[3].toLong()
+                            "%.1f".format(raw / 10.0) + " km"
+                        } else {
+                            "pas de réponse"
+                        }
+                        val s42 = hexAfter(elm.request("0142", 2500), "4142", 2)
+                        v42 = if (s42 != null) {
+                            "%.2f".format((s42[0] * 256 + s42[1]) / 1000.0) + " V"
+                        } else {
+                            "pas de réponse"
+                        }
+                        refreshLive()
+                    }
+                    Thread.sleep(700)
+                } catch (e: Exception) {
+                    log("Lecture live : ${e.message}")
+                    Thread.sleep(1500)
+                }
+            }
+        }
+    }
+
+    private fun testsBase() {
+        if (!ready) {
+            log("Dongle pas prêt : connectez-vous d'abord.")
+            return
+        }
+        thread(name = "tests") {
+            val cmds = listOf(
+                "ATI", "AT@1", "ATRV", "ATDP",
+                "0100", "0120", "0140", "0160", "0180", "01A0", "01C0",
+                "0101", "0902"
+            )
+            for (c in cmds) {
+                log("> $c\n" + elm.request(c, 8000))
+            }
+            log("Tests de base terminés.")
+        }
+    }
+
+    private fun testsBatterie() {
+        if (!ready) {
+            log("Dongle pas prêt : connectez-vous d'abord.")
+            return
+        }
+        thread(name = "tests2") {
+            log("> ATH1 (affiche l'adresse de chaque calculateur)\n" + elm.request("ATH1", 3000))
+            val cmds = listOf(
+                "0100", "015B", "01A6", "0142", "0146", "0149",
+                "0105", "0104", "010C", "010D"
+            )
+            for (c in cmds) {
+                log("> $c\n" + elm.request(c, 8000))
+            }
+            log("> ATH0\n" + elm.request("ATH0", 3000))
+            log("Tests batterie terminés.")
+        }
+    }
+
+    private fun sendManual() {
+        val c = cmdEt.text.toString().trim().uppercase(Locale.ROOT)
+        if (c.isEmpty()) return
+        cmdEt.setText("")
+        thread(name = "cmd") {
+            log("> $c\n" + elm.request(c, 8000))
+        }
+    }
 }
-
-android {
-    namespace = "fr.alexandre.mg4link"
-    compileSdk = 34
-
-    defaultConfig {
-        applicationId = "fr.alexandre.mg4link"
-        minSdk = 26
-        targetSdk = 34
-        versionCode = 3
-        versionName = "0.3"
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-}org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-android.nonTransitiveRClass=true
-kotlin.code.style=official
-plugins {
-    id("com.android.application") version "8.5.2" apply false
-    id("org.jetbrains.kotlin.android") version "1.9.24" apply false
-}2
-pluginManagement {
-    repositories {
-        google()
-        mavenCentral()
-        gradlePluginPortal()
-    }
-}
-dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
-rootProject.name = "MG4Link"
-include(":app")
