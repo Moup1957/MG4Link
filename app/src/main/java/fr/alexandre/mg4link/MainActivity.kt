@@ -60,6 +60,9 @@ private fun propsText(p: Int): String {
 /** Appareil Bluetooth LE vu pendant le scan. */
 class Found(val dev: BluetoothDevice, var name: String, var rssi: Int)
 
+/** Étape d'un itinéraire : nom et distance prévue depuis l'étape précédente. */
+class Stage(val name: String, val km: Double)
+
 /**
  * Lien série ELM327 au-dessus d'une caractéristique BLE :
  * on écrit une commande, on attend la réponse jusqu'au prompt '>'.
@@ -128,6 +131,7 @@ class MainActivity : Activity() {
 
     private lateinit var statusTv: TextView
     private lateinit var liveTv: TextView
+    private lateinit var routeTv: TextView
     private lateinit var logTv: TextView
     private lateinit var logScroll: ScrollView
     private lateinit var cmdEt: EditText
@@ -167,6 +171,20 @@ class MainActivity : Activity() {
     private var lastLoc: Location? = null
     private var gpsStarted = false
 
+    // ------------------------------------------------------- Itinéraire v0.4
+    @Volatile
+    private var socPct = -1.0
+
+    @Volatile
+    private var consoPctPerKm = 0.22
+
+    private val stages = ArrayList<Stage>()
+    private var tripActive = false
+    private var stageIdx = 0
+    private var stageStartKm = 0.0
+    private var stageStartSoc = -1.0
+    private var lowWarned = false
+
     // ------------------------------------------------------------------ UI
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -199,7 +217,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.3 - non connecté"
+        statusTv.text = "MG4 Link v0.4 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -230,6 +248,21 @@ class MainActivity : Activity() {
         liveTv.setPadding(0, dp(8), 0, dp(8))
         root.addView(liveTv)
         refreshLive()
+
+        root.addView(
+            row(
+                makeButton("Itinéraire…") { editStages() },
+                makeButton("Démarrer le trajet") { startTrip() },
+                makeButton("Étape suivante") { nextStage() }
+            )
+        )
+
+        routeTv = TextView(this)
+        routeTv.typeface = Typeface.MONOSPACE
+        routeTv.textSize = 12f
+        routeTv.setPadding(0, dp(4), 0, dp(4))
+        root.addView(routeTv)
+        refreshRoute()
 
         cmdEt = EditText(this)
         cmdEt.hint = "Commande, ex. 010D (lecture seule !)"
@@ -264,7 +297,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.3 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.4 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         if (hasAll()) startGps()
     }
 
@@ -635,6 +668,7 @@ class MainActivity : Activity() {
                         volt = elm.request("ATRV", 2500)
                         val s5 = hexAfter(elm.request("015B", 2500), "415B", 1)
                         soc = if (s5 != null) "%.1f".format(s5[0] * 100.0 / 255.0) + " %" else "pas de réponse"
+                        socPct = if (s5 != null) s5[0] * 100.0 / 255.0 else socPct
                         val so = hexAfter(elm.request("01A6", 2500), "41A6", 4)
                         odo = if (so != null) {
                             val raw = (so[0].toLong() shl 24) or (so[1].toLong() shl 16) or
@@ -650,6 +684,14 @@ class MainActivity : Activity() {
                             "pas de réponse"
                         }
                         refreshLive()
+                        if (tripActive && stageIdx < stages.size &&
+                            (tripKm - stageStartKm) >= stages[stageIdx].km) finishStage(false)
+                        if (socPct >= 0.0 && socPct <= 15.0 && !lowWarned) {
+                            lowWarned = true
+                            warnLow()
+                        }
+                        if (socPct > 16.0) lowWarned = false
+                        refreshRoute()
                     }
                     Thread.sleep(700)
                 } catch (e: Exception) {
@@ -704,5 +746,131 @@ class MainActivity : Activity() {
         thread(name = "cmd") {
             log("> $c\n" + elm.request(c, 8000))
         }
+    }
+
+    // ------------------------------------------------------- Itinéraire
+
+    private fun editStages() {
+        val input = EditText(this)
+        input.hint = "Une étape par ligne : Nom;km (ex : Reims;145)"
+        input.setText(stages.joinToString("\n") { it.name + ";" + it.km })
+        AlertDialog.Builder(this)
+            .setTitle("Définir l'itinéraire")
+            .setView(input)
+            .setPositiveButton("OK") { _, _ ->
+                stages.clear()
+                for (line in input.text.toString().lines()) {
+                    val t = line.trim()
+                    if (t.isEmpty()) continue
+                    val parts = t.split(';')
+                    val name = parts[0].trim()
+                    val km = parts.getOrNull(1)?.trim()?.replace(',', '.')?.toDoubleOrNull()
+                    if (name.isNotEmpty() && km != null && km > 0) stages.add(Stage(name, km))
+                }
+                log("Itinéraire : " + stages.size + " étape(s), total " +
+                    "%.0f".format(stages.sumOf { it.km }) + " km")
+                refreshRoute()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun startTrip() {
+        if (stages.isEmpty()) {
+            log("Définissez d'abord un itinéraire avec le bouton « Itinéraire… ».")
+            return
+        }
+        if (tripActive) {
+            tripActive = false
+            log("Trajet interrompu.")
+            refreshRoute()
+            return
+        }
+        tripActive = true
+        stageIdx = 0
+        stageStartKm = tripKm
+        stageStartSoc = socPct
+        lowWarned = false
+        log("Trajet démarré : prochaine étape « " + stages[0].name + " » à " +
+            "%.0f".format(stages[0].km) + " km.")
+        refreshRoute()
+    }
+
+    private fun nextStage() {
+        if (!tripActive) {
+            log("Aucun trajet en cours : touchez « Démarrer le trajet ».")
+            return
+        }
+        if (stageIdx < stages.size) finishStage(true)
+    }
+
+    private fun finishStage(manual: Boolean) {
+        val s = stages[stageIdx]
+        val driven = tripKm - stageStartKm
+        val sc = socPct
+        if (sc >= 0 && stageStartSoc >= 0 && driven > 0.5) {
+            val sample = (stageStartSoc - sc) / driven
+            if (sample > 0.02 && sample < 2.0) {
+                consoPctPerKm = 0.7 * consoPctPerKm + 0.3 * sample
+                log("Consommation mesurée : " + "%.3f".format(consoPctPerKm) +
+                    " %/km (sur " + "%.1f".format(driven) + " km)")
+            }
+        }
+        log("Étape « " + s.name + " » " + (if (manual) "validée" else "atteinte") +
+            " : " + "%.1f".format(driven) + " km parcourus, charge " +
+            (if (sc >= 0) "%.1f".format(sc) + " %" else "inconnue"))
+        stageIdx++
+        stageStartKm = tripKm
+        stageStartSoc = sc
+        if (stageIdx >= stages.size) {
+            tripActive = false
+            log("Itinéraire terminé !")
+            status("Itinéraire terminé")
+        }
+        refreshRoute()
+    }
+
+    private fun warnLow() {
+        log("ATTENTION : charge à 15 % ou moins - prévoyez une recharge !")
+        status("Charge basse (15 %)")
+        handler.post {
+            AlertDialog.Builder(this)
+                .setTitle("Charge basse")
+                .setMessage("La batterie est à " + soc + ". Prévoyez une recharge.")
+                .setPositiveButton("Compris", null)
+                .show()
+        }
+    }
+
+    private fun refreshRoute() {
+        if (!this::routeTv.isInitialized) return
+        val sb = StringBuilder()
+        if (stages.isEmpty()) {
+            sb.append("Itinéraire non défini - touchez « Itinéraire… »")
+        } else {
+            sb.append("Conso estimée : ").append("%.2f".format(consoPctPerKm)).append(" %/km\n")
+            val sc = socPct
+            var cum = 0.0
+            for (i in stages.indices) {
+                val s = stages[i]
+                cum += s.km
+                var state = "  "
+                if (i < stageIdx) state = "✓"
+                if (tripActive && i == stageIdx) state = "→"
+                var pred = "?"
+                if (sc >= 0) {
+                    val p = sc - cum * consoPctPerKm
+                    pred = "%.0f".format(p) + " %" + (if (p < 15.0) " !" else "")
+                }
+                sb.append(state).append(' ').append(i + 1).append(". ").append(s.name)
+                    .append(" (").append("%.0f".format(s.km)).append(" km) → ").append(pred).append('\n')
+            }
+            if (tripActive && stageIdx < stages.size) {
+                sb.append("Reste " + "%.1f".format(stages[stageIdx].km - (tripKm - stageStartKm)) +
+                    " km avant " + stages[stageIdx].name)
+            }
+        }
+        val txt = sb.toString()
+        handler.post { routeTv.text = txt }
     }
 }
