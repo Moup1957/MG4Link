@@ -18,14 +18,20 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
+import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -35,6 +41,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
+import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -185,6 +192,12 @@ class MainActivity : Activity() {
     private var stageStartSoc = -1.0
     private var lowWarned = false
 
+    // -------------------------------------------- Fenêtre flottante v0.5
+    private var overlayLayout: LinearLayout? = null
+    private var overlayTv: TextView? = null
+    private val wm: WindowManager
+        get() = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
     // ------------------------------------------------------------------ UI
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -217,7 +230,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.4 - non connecté"
+        statusTv.text = "MG4 Link v0.5 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -254,6 +267,13 @@ class MainActivity : Activity() {
                 makeButton("Itinéraire…") { editStages() },
                 makeButton("Démarrer le trajet") { startTrip() },
                 makeButton("Étape suivante") { nextStage() }
+            )
+        )
+
+        root.addView(
+            row(
+                makeButton("Itinéraire dans Maps") { openInMaps() },
+                makeButton("Fenêtre flottante") { toggleOverlay() }
             )
         )
 
@@ -297,13 +317,14 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.4 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.5 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         if (hasAll()) startGps()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         disconnect()
+        hideOverlay()
         try {
             val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
             lm.removeUpdates(locListener)
@@ -692,6 +713,7 @@ class MainActivity : Activity() {
                         }
                         if (socPct > 16.0) lowWarned = false
                         refreshRoute()
+                        refreshOverlay()
                     }
                     Thread.sleep(700)
                 } catch (e: Exception) {
@@ -872,5 +894,143 @@ class MainActivity : Activity() {
         }
         val txt = sb.toString()
         handler.post { routeTv.text = txt }
+    }
+
+    // ------------------------------------------- Google Maps + fenêtre flottante
+
+    private fun openInMaps() {
+        if (stages.isEmpty()) {
+            log("Définissez d'abord un itinéraire avec le bouton « Itinéraire… ».")
+            return
+        }
+        try {
+            val dest = URLEncoder.encode(stages.last().name, "UTF-8")
+            val wps = stages.dropLast(1).take(9).joinToString("%7C") { URLEncoder.encode(it.name, "UTF-8") }
+            val url = "https://www.google.com/maps/dir/?api=1&destination=" + dest +
+                (if (wps.isNotEmpty()) "&waypoints=" + wps else "")
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            log("Itinéraire envoyé à Google Maps (" + stages.size + " étape(s)).")
+        } catch (e: Exception) {
+            log("Impossible d'ouvrir Maps : " + e.message)
+        }
+    }
+
+    private fun toggleOverlay() {
+        if (overlayLayout != null) {
+            hideOverlay()
+            return
+        }
+        if (!Settings.canDrawOverlays(this)) {
+            log("Autorisation manquante : dans les réglages Android, autorisez MG4 Link à " +
+                "« s'afficher par-dessus d'autres applications », puis retouchez le bouton.")
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + packageName))
+                )
+            } catch (e: Exception) {
+                log("Impossible d'ouvrir les réglages : " + e.message)
+            }
+            return
+        }
+        showOverlay()
+    }
+
+    private fun showOverlay() {
+        val layout = LinearLayout(this)
+        layout.orientation = LinearLayout.HORIZONTAL
+        layout.setBackgroundColor(Color.argb(200, 20, 70, 30))
+        val tv = TextView(this)
+        tv.typeface = Typeface.MONOSPACE
+        tv.textSize = 13f
+        tv.setTextColor(Color.WHITE)
+        tv.setPadding(dp(10), dp(8), dp(6), dp(8))
+        val close = Button(this)
+        close.text = "×"
+        close.setPadding(dp(6), 0, dp(6), 0)
+        close.setOnClickListener { hideOverlay() }
+        layout.addView(tv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        layout.addView(close, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        )
+        params.gravity = Gravity.TOP or Gravity.START
+        params.x = dp(10)
+        params.y = dp(120)
+
+        var downX = 0f
+        var downY = 0f
+        var startX = 0
+        var startY = 0
+        layout.setOnTouchListener { _, ev ->
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = ev.rawX
+                    downY = ev.rawY
+                    startX = params.x
+                    startY = params.y
+                    false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val nx = startX + (ev.rawX - downX).toInt()
+                    val ny = startY + (ev.rawY - downY).toInt()
+                    if (Math.abs(nx - params.x) > 4 || Math.abs(ny - params.y) > 4) {
+                        params.x = nx
+                        params.y = ny
+                        wm.updateViewLayout(layout, params)
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+
+        try {
+            wm.addView(layout, params)
+            overlayLayout = layout
+            overlayTv = tv
+            log("Fenêtre flottante affichée - glissez-la pour la déplacer, × pour la fermer.")
+            refreshOverlay()
+        } catch (e: Exception) {
+            log("Fenêtre flottante impossible : " + e.message)
+        }
+    }
+
+    private fun hideOverlay() {
+        val l = overlayLayout
+        if (l != null) {
+            try {
+                wm.removeView(l)
+            } catch (e: Exception) {
+                // rien
+            }
+            overlayLayout = null
+            overlayTv = null
+        }
+    }
+
+    private fun refreshOverlay() {
+        val tv = overlayTv ?: return
+        val sc = socPct
+        val sb = StringBuilder()
+        sb.append("⚡ ").append(if (sc >= 0) "%.1f".format(sc) + " %" else "-- %")
+        if (tripActive && stageIdx < stages.size) {
+            val s = stages[stageIdx]
+            val remain = (s.km - (tripKm - stageStartKm)).coerceAtLeast(0.0)
+            sb.append('\n').append(s.name).append(" : ")
+                .append("%.1f".format(remain)).append(" km")
+            if (sc >= 0) {
+                val p = sc - remain * consoPctPerKm
+                sb.append('\n').append("Arrivée : ").append("%.0f".format(p)).append(" %")
+            }
+        }
+        val txt = sb.toString()
+        handler.post { tv.text = txt }
     }
 }
