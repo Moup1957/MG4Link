@@ -30,6 +30,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.InputType
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -178,7 +179,7 @@ class MainActivity : Activity() {
     private var lastLoc: Location? = null
     private var gpsStarted = false
 
-    // ------------------------------------------------------- Itinéraire v0.4
+    // ------------------------------------------------------- Itinéraire
     @Volatile
     private var socPct = -1.0
 
@@ -192,7 +193,7 @@ class MainActivity : Activity() {
     private var stageStartSoc = -1.0
     private var lowWarned = false
 
-    // -------------------------------------------- Fenêtre flottante v0.5
+    // -------------------------------------------- Fenêtre flottante
     private var overlayLayout: LinearLayout? = null
     private var overlayTv: TextView? = null
     private val wm: WindowManager
@@ -772,25 +773,52 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------- Itinéraire
 
+    /** Analyse une ligne : accepte "Nom;km", "Nom : km", "Nom, km" ou "Nom 145 km". */
+    private fun parseStage(line: String): Stage? {
+        val t = line.trim()
+        if (t.isEmpty()) return null
+        val sep = Regex("^(.+?)[;:\\u0009]\\s*([0-9]+(?:[.,][0-9]+)?)\\s*(km)?\\s*$").find(t)
+        if (sep != null) {
+            val n = sep.groupValues[1].trim().trimEnd(';', ':', ',')
+            val k = sep.groupValues[2].replace(',', '.').toDoubleOrNull() ?: return null
+            if (n.isNotEmpty() && k > 0) return Stage(n, k)
+        }
+        val m = Regex("^(.+?)[,;:]?\\s+([0-9]+(?:[.,][0-9]+)?)\\s*(km)?\\s*$").find(t)
+        if (m != null) {
+            val n = m.groupValues[1].trim().trimEnd(';', ':', ',')
+            val k = m.groupValues[2].replace(',', '.').toDoubleOrNull() ?: return null
+            if (n.isNotEmpty() && k > 0) return Stage(n, k)
+        }
+        return null
+    }
+
     private fun editStages() {
         val input = EditText(this)
-        input.hint = "Une étape par ligne : Nom;km (ex : Reims;145)"
+        input.hint = "Une étape par ligne.\nFormats acceptés :\nReims;145\nReims : 145\nReims 145"
+        input.setSingleLine(false)
+        input.minLines = 6
+        input.gravity = Gravity.TOP
+        input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
         input.setText(stages.joinToString("\n") { it.name + ";" + it.km })
         AlertDialog.Builder(this)
             .setTitle("Définir l'itinéraire")
             .setView(input)
             .setPositiveButton("OK") { _, _ ->
                 stages.clear()
+                var rejets = 0
                 for (line in input.text.toString().lines()) {
-                    val t = line.trim()
-                    if (t.isEmpty()) continue
-                    val parts = t.split(';')
-                    val name = parts[0].trim()
-                    val km = parts.getOrNull(1)?.trim()?.replace(',', '.')?.toDoubleOrNull()
-                    if (name.isNotEmpty() && km != null && km > 0) stages.add(Stage(name, km))
+                    if (line.isBlank()) continue
+                    val st = parseStage(line)
+                    if (st != null) {
+                        stages.add(st)
+                    } else {
+                        rejets++
+                        log("Ligne d'itinéraire non comprise : " + line.trim())
+                    }
                 }
                 log("Itinéraire : " + stages.size + " étape(s), total " +
-                    "%.0f".format(stages.sumOf { it.km }) + " km")
+                    "%.0f".format(stages.sumOf { it.km }) + " km" +
+                    (if (rejets > 0) " (" + rejets + " ligne(s) ignorée(s))" else ""))
                 refreshRoute()
             }
             .setNegativeButton("Annuler", null)
@@ -938,15 +966,16 @@ class MainActivity : Activity() {
     private fun showOverlay() {
         val layout = LinearLayout(this)
         layout.orientation = LinearLayout.HORIZONTAL
-        layout.setBackgroundColor(Color.argb(200, 20, 70, 30))
+        layout.setBackgroundColor(Color.argb(215, 15, 60, 25))
         val tv = TextView(this)
         tv.typeface = Typeface.MONOSPACE
-        tv.textSize = 13f
+        tv.textSize = 16f
         tv.setTextColor(Color.WHITE)
-        tv.setPadding(dp(10), dp(8), dp(6), dp(8))
+        tv.setPadding(dp(16), dp(12), dp(8), dp(12))
         val close = Button(this)
         close.text = "×"
-        close.setPadding(dp(6), 0, dp(6), 0)
+        close.textSize = 18f
+        close.setPadding(dp(8), 0, dp(8), 0)
         close.setOnClickListener { hideOverlay() }
         layout.addView(tv, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -1023,13 +1052,16 @@ class MainActivity : Activity() {
         if (tripActive && stageIdx < stages.size) {
             val s = stages[stageIdx]
             val remain = (s.km - (tripKm - stageStartKm)).coerceAtLeast(0.0)
-            sb.append('\n').append(s.name).append(" : ")
-                .append("%.1f".format(remain)).append(" km")
+            sb.append('\n').append(s.name)
+            sb.append('\n').append("reste ").append("%.1f".format(remain)).append(" km")
             if (sc >= 0) {
                 val p = sc - remain * consoPctPerKm
-                sb.append('\n').append("Arrivée : ").append("%.0f".format(p)).append(" %")
+                sb.append('\n').append("arrivée : ").append("%.0f".format(p)).append(" %")
             }
+        } else {
+            if (stages.isNotEmpty()) sb.append('\n').append("trajet non démarré")
         }
+        sb.append('\n').append("%.2f".format(consoPctPerKm)).append(" %/km")
         val txt = sb.toString()
         handler.post { tv.text = txt }
     }
