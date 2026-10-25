@@ -26,4 +26,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk MG4Link.apk
-          gh release create "v0.3-build${{ github.run_number }}" MG4Link.apk --repo "${{ github.repository }}" --title "MG4 Link v0.3 (build ${{ github.run_number }})" --notes "Compilation depuis les sources du dépôt" --clobber
+          gh release create "v0.3-build${{ github.run_number }}" MG4Link.apk --repo "${{ github.repository }}" --title "MG4 Link v0.3 (build ${{ github.run_number }})" --notes "Compilation depuis les sources du dépôt" 
