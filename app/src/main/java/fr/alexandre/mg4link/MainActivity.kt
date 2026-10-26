@@ -201,6 +201,13 @@ class MainActivity : Activity() {
     private var stageStartSoc = -1.0
     private var lowWarned = false
 
+    // Apprentissage continu (v0.7.2)
+    @Volatile
+    private var learnKm = 0.0
+
+    @Volatile
+    private var learnSoc = -1.0
+
     // -------------------------------------------- Fenêtre flottante
     private var overlayLayout: LinearLayout? = null
     private var overlayTv: TextView? = null
@@ -245,7 +252,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.7.1 - non connecté"
+        statusTv.text = "MG4 Link v0.7.2 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -295,7 +302,8 @@ class MainActivity : Activity() {
         root.addView(
             row(
                 makeButton("Sauver itinéraire") { saveItinerary() },
-                makeButton("Charger itinéraire") { loadItinerary() }
+                makeButton("Charger itinéraire") { loadItinerary() },
+                makeButton("Calibrage…") { calibrate() }
             )
         )
 
@@ -346,7 +354,14 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.7.1 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.7.2 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+        val savedConso = prefs.getFloat("conso", 0f)
+        if (savedConso > 0f) {
+            consoPctPerKm = savedConso.toDouble()
+            log("Calibrage mémorisé : " + "%.3f".format(consoPctPerKm) + " %/km (autonomie à 100 % : " +
+                "%.0f".format(100.0 / consoPctPerKm) + " km)")
+        }
         if (hasAll()) startGps()
         thread(name = "bornes-cache") { loadBornesCache() }
     }
@@ -763,6 +778,28 @@ class MainActivity : Activity() {
                         } else {
                             "pas de réponse"
                         }
+                        // Apprentissage continu (v0.7.2) : réapprend la consommation tous les 2 km.
+                        if (socPct >= 0.0) {
+                            if (learnSoc < 0.0) {
+                                learnSoc = socPct
+                                learnKm = tripKm
+                            } else {
+                                val dKm = tripKm - learnKm
+                                if (dKm >= 2.0) {
+                                    val sample = (learnSoc - socPct) / dKm
+                                    if (sample > 0.02 && sample < 2.0) {
+                                        val old = consoPctPerKm
+                                        consoPctPerKm = 0.75 * consoPctPerKm + 0.25 * sample
+                                        log("Conso réappris en roulant : " + "%.3f".format(old) + " → " +
+                                            "%.3f".format(consoPctPerKm) + " %/km (sur " +
+                                            "%.1f".format(dKm) + " km)")
+                                        persistConso()
+                                    }
+                                    learnSoc = socPct
+                                    learnKm = tripKm
+                                }
+                            }
+                        }
                         refreshLive()
                         if (tripActive && stageIdx < stages.size &&
                             (tripKm - stageStartKm) >= stages[stageIdx].km) finishStage(false)
@@ -831,17 +868,22 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------- Itinéraire
 
-    /** Analyse une ligne : accepte "Nom;km", "Nom : km", "Nom, km" ou "Nom 145 km". */
+    /**
+     * Analyse une ligne d'itinéraire (v0.7.2) :
+     * - "Nom;km" ou "Nom : km" (recommandé, le nom peut être une adresse complète) ;
+     * - "Nom 145 km" accepté seulement si le nom ne contient aucun chiffre
+     *   (pour éviter de confondre un numéro de rue ou un code postal avec une distance).
+     */
     private fun parseStage(line: String): Stage? {
         val t = line.trim()
         if (t.isEmpty()) return null
-        val sep = Regex("^(.+?)[;:\\u0009]\\s*([0-9]+(?:[.,][0-9]+)?)\\s*(km)?\\s*$").find(t)
+        val sep = Regex("^(.+?)[;:]\\s*([0-9]+(?:[.,][0-9]+)?)\\s*(km)?\\s*$").find(t)
         if (sep != null) {
             val n = sep.groupValues[1].trim().trimEnd(';', ':', ',')
             val k = sep.groupValues[2].replace(',', '.').toDoubleOrNull() ?: return null
             if (n.isNotEmpty() && k > 0) return Stage(n, k)
         }
-        val m = Regex("^(.+?)[,;:]?\\s+([0-9]+(?:[.,][0-9]+)?)\\s*(km)?\\s*$").find(t)
+        val m = Regex("^(\\D*?)\\s+([0-9]+(?:[.,][0-9]+)?)\\s*(km)\\s*$").find(t)
         if (m != null) {
             val n = m.groupValues[1].trim().trimEnd(';', ':', ',')
             val k = m.groupValues[2].replace(',', '.').toDoubleOrNull() ?: return null
@@ -852,7 +894,7 @@ class MainActivity : Activity() {
 
     private fun editStages() {
         val input = EditText(this)
-        input.hint = "Une étape par ligne.\nFormats acceptés :\nReims;145\nReims : 145\nReims 145"
+        input.hint = "Une étape par ligne.\nFormats acceptés :\nReims;145\nReims : 145\n3 le haut fief 44190 Gorges;35\n(adresse complète : distance OBLIGATOIRE après ; ou :)"
         input.setSingleLine(false)
         input.minLines = 6
         input.gravity = Gravity.TOP
@@ -863,21 +905,28 @@ class MainActivity : Activity() {
             .setView(input)
             .setPositiveButton("OK") { _, _ ->
                 stages.clear()
-                var rejets = 0
+                val rejetees = ArrayList<String>()
                 for (line in input.text.toString().lines()) {
                     if (line.isBlank()) continue
                     val st = parseStage(line)
                     if (st != null) {
                         stages.add(st)
                     } else {
-                        rejets++
+                        rejetees.add(line.trim())
                         log("Ligne d'itinéraire non comprise : " + line.trim())
                     }
                 }
                 log("Itinéraire : " + stages.size + " étape(s), total " +
                     "%.0f".format(stages.sumOf { it.km }) + " km" +
-                    (if (rejets > 0) " (" + rejets + " ligne(s) ignorée(s))" else ""))
+                    (if (rejetees.isNotEmpty()) " (" + rejetees.size + " ligne(s) ignorée(s))" else ""))
                 refreshRoute()
+                if (rejetees.isNotEmpty()) {
+                    alert(
+                        "Lignes ignorées (" + rejetees.size + ")",
+                        "Non comprises (il faut une distance après « ; » ou « : », ex. « adresse;35 ») :\n\n" +
+                            rejetees.joinToString("\n")
+                    )
+                }
             }
             .setNegativeButton("Annuler", null)
             .show()
@@ -940,6 +989,44 @@ class MainActivity : Activity() {
                 } else {
                     log("Itinéraire « " + names[i] + " illisible.")
                 }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    /** Mémorise la consommation apprise/calibrée. */
+    private fun persistConso() {
+        getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
+            .putFloat("conso", consoPctPerKm.toFloat())
+            .apply()
+    }
+
+    /** Calibrage manuel : autonomie réelle à 100 % → consommation %/km (v0.7.2). */
+    private fun calibrate() {
+        val input = EditText(this)
+        input.hint = "Autonomie réelle à 100 % (km), ex. 380"
+        input.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        input.setText("%.0f".format(100.0 / consoPctPerKm))
+        AlertDialog.Builder(this)
+            .setTitle("Calibrage de l'autonomie")
+            .setMessage(
+                "Indique l'autonomie que la voiture affiche batterie pleine (100 %).\n" +
+                    "L'app en déduit la consommation en %/km, la mémorise et repartira dessus au démarrage."
+            )
+            .setView(input)
+            .setPositiveButton("OK") { _, _ ->
+                val km = input.text.toString().replace(',', '.').toDoubleOrNull()
+                if (km == null || km < 150.0 || km > 800.0) {
+                    alert("Calibrage", "Valeur invalide : entrez un nombre entre 150 et 800 km.")
+                    return@setPositiveButton
+                }
+                consoPctPerKm = 100.0 / km
+                learnSoc = -1.0
+                persistConso()
+                log("Calibrage : autonomie 100 % = " + "%.0f".format(km) + " km → " +
+                    "%.3f".format(consoPctPerKm) + " %/km (mémorisé).")
+                refreshRoute()
+                refreshLive()
             }
             .setNegativeButton("Annuler", null)
             .show()
