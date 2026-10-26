@@ -42,7 +42,12 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
+import java.io.BufferedReader
+import java.io.File
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
 import java.net.URLEncoder
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -70,6 +75,9 @@ class Found(val dev: BluetoothDevice, var name: String, var rssi: Int)
 
 /** Étape d'un itinéraire : nom et distance prévue depuis l'étape précédente. */
 class Stage(val name: String, val km: Double)
+
+/** Borne de recharge issue de la base IRVE. */
+class Borne(val lat: Double, val lon: Double, val kw: Double, val enseigne: String, val nom: String, val adresse: String)
 
 /**
  * Lien série ELM327 au-dessus d'une caractéristique BLE :
@@ -199,6 +207,12 @@ class MainActivity : Activity() {
     private val wm: WindowManager
         get() = getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
+    // --------------------------------------------------- Bornes IRVE v0.7
+    private val bornes = ArrayList<Borne>()
+
+    @Volatile
+    private var bornesLoading = false
+
     // ------------------------------------------------------------------ UI
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -231,7 +245,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.6 - non connecté"
+        statusTv.text = "MG4 Link v0.7 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -285,6 +299,13 @@ class MainActivity : Activity() {
             )
         )
 
+        root.addView(
+            row(
+                makeButton("Bornes recharge") { showBornes() },
+                makeButton("Mettre à jour bornes") { updateBornes(true) }
+            )
+        )
+
         routeTv = TextView(this)
         routeTv.typeface = Typeface.MONOSPACE
         routeTv.textSize = 12f
@@ -325,8 +346,9 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.6 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.7 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         if (hasAll()) startGps()
+        thread(name = "bornes-cache") { loadBornesCache() }
     }
 
     override fun onDestroy() {
@@ -1138,5 +1160,315 @@ class MainActivity : Activity() {
         sb.append('\n').append("%.2f".format(consoPctPerKm)).append(" %/km")
         val txt = sb.toString()
         handler.post { tv.text = txt }
+    }
+
+    // ------------------------------------------------------ Bornes IRVE v0.7
+
+    private fun bornesFile(): File = File(filesDir, "bornes_cache.txt")
+
+    private fun bornesAgeMs(): Long {
+        val d = getSharedPreferences("mg4link", Context.MODE_PRIVATE).getLong("bornesDate", 0L)
+        return if (d == 0L) Long.MAX_VALUE else System.currentTimeMillis() - d
+    }
+
+    private fun loadBornesCache() {
+        val f = bornesFile()
+        if (!f.exists()) return
+        try {
+            val lst = ArrayList<Borne>()
+            f.forEachLine { line ->
+                val p = line.split(';')
+                if (p.size >= 5) {
+                    val lat = p[0].toDoubleOrNull() ?: return@forEachLine
+                    val lon = p[1].toDoubleOrNull() ?: return@forEachLine
+                    val kw = p[2].toDoubleOrNull() ?: return@forEachLine
+                    lst.add(Borne(lat, lon, kw, p[3], p[3], p[4]))
+                }
+            }
+            if (lst.isNotEmpty()) {
+                synchronized(bornes) {
+                    bornes.clear()
+                    bornes.addAll(lst)
+                }
+                log("Base IRVE en cache : " + bornes.size + " bornes (mise à jour il y a " +
+                    (bornesAgeMs() / 3600000L) + " h).")
+            }
+        } catch (e: Exception) {
+            log("Cache IRVE illisible : " + e.message)
+        }
+    }
+
+    private fun splitCsvLine(line: String): List<String> {
+        val out = ArrayList<String>()
+        val cur = StringBuilder()
+        var inQ = false
+        var i = 0
+        while (i < line.length) {
+            val ch = line[i]
+            if (inQ) {
+                if (ch == '"') {
+                    if (i + 1 < line.length && line[i + 1] == '"') {
+                        cur.append('"')
+                        i++
+                    } else {
+                        inQ = false
+                    }
+                } else {
+                    cur.append(ch)
+                }
+            } else {
+                when (ch) {
+                    '"' -> inQ = true
+                    ';' -> {
+                        out.add(cur.toString())
+                        cur.setLength(0)
+                    }
+                    else -> cur.append(ch)
+                }
+            }
+            i++
+        }
+        out.add(cur.toString())
+        return out
+    }
+
+    /** "lon,lat" (éventuellement entre crochets) -> [lat, lon]. */
+    private fun parseCoord(s: String): DoubleArray? {
+        val t = s.replace("[", "").replace("]", "").trim()
+        val parts = t.split(',')
+        if (parts.size < 2) return null
+        val lon = parts[0].trim().toDoubleOrNull() ?: return null
+        val lat = parts[1].trim().toDoubleOrNull() ?: return null
+        return doubleArrayOf(lat, lon)
+    }
+
+    private fun httpGet(urlStr: String, timeoutMs: Int): String {
+        val conn = URL(urlStr).openConnection() as HttpURLConnection
+        conn.connectTimeout = timeoutMs
+        conn.readTimeout = timeoutMs
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (MG4Link)")
+        try {
+            val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
+            val sb = StringBuilder()
+            var line = reader.readLine()
+            while (line != null) {
+                sb.append(line)
+                line = reader.readLine()
+            }
+            reader.close()
+            return sb.toString()
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun downloadCsv(urlStr: String, onLine: (String) -> Unit): Int {
+        val conn = URL(urlStr).openConnection() as HttpURLConnection
+        conn.connectTimeout = 30000
+        conn.readTimeout = 300000
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (MG4Link)")
+        var count = 0
+        try {
+            val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
+            var line = reader.readLine()
+            while (line != null) {
+                onLine(line)
+                count++
+                line = reader.readLine()
+            }
+            reader.close()
+        } finally {
+            conn.disconnect()
+        }
+        return count
+    }
+
+    private fun updateBornes(force: Boolean) {
+        if (bornesLoading) {
+            log("Téléchargement des bornes déjà en cours, patientez...")
+            return
+        }
+        if (!force && bornes.isNotEmpty() && bornesAgeMs() < 7L * 24L * 3600L * 1000L) {
+            log("Base des bornes déjà à jour.")
+            return
+        }
+        bornesLoading = true
+        log("Mise à jour de la base IRVE France (Wi-Fi conseillé, 1 à 2 min)...")
+        thread(name = "bornes-dl") {
+            try {
+                val api = "https://www.data.gouv.fr/api/1/datasets/" +
+                    "base-nationale-des-irve-data-gouv-infrastructures-de-recharge-pour-vehicules-electriques-donnees-statiques/"
+                val json = httpGet(api, 30000)
+                val urls = Regex("https:[^\"\\\\]+?\\.csv")
+                    .findAll(json).map { it.value }.toList()
+                    .filter { it.contains("consolidation-etalab-schema-irve-statique") }
+                if (urls.isEmpty()) {
+                    log("ERREUR : URL de la base IRVE introuvable - réessayez plus tard.")
+                    return@thread
+                }
+                val best = urls.maxByOrNull { Regex("(\\d{8})").find(it)?.groupValues?.get(1) ?: "0" }!!
+                log("Fichier source : " + best.substringAfterLast('/'))
+
+                val parsed = ArrayList<Borne>()
+                var header: List<String>? = null
+                var iCoord = -1
+                var iKw = -1
+                var iEnseigne = -1
+                var iNom = -1
+                var iAdr = -1
+                val out = StringBuilder()
+                var n = 0
+                downloadCsv(best) { line ->
+                    if (header == null) {
+                        header = splitCsvLine(line)
+                        iCoord = header!!.indexOf("coordonneesXY")
+                        iKw = header!!.indexOf("puissance_max")
+                        iEnseigne = header!!.indexOf("nom_enseigne")
+                        iNom = header!!.indexOf("nom_station")
+                        iAdr = header!!.indexOf("adresse_station")
+                        log("Colonnes IRVE : coordonnees=$iCoord puissance=$iKw enseigne=$iEnseigne")
+                    } else if (iCoord >= 0 && iKw >= 0) {
+                        val f = splitCsvLine(line)
+                        if (f.size > iCoord && f.size > iKw) {
+                            val ll = parseCoord(f[iCoord])
+                            val kw = f[iKw].replace(',', '.').toDoubleOrNull() ?: 0.0
+                            if (ll != null && kw >= 22.0) {
+                                val enseigne = if (iEnseigne >= 0 && f.size > iEnseigne && f[iEnseigne].isNotEmpty()) {
+                                    f[iEnseigne]
+                                } else {
+                                    if (iNom >= 0 && f.size > iNom && f[iNom].isNotEmpty()) f[iNom] else "Opérateur ?"
+                                }
+                                val nom = if (iNom >= 0 && f.size > iNom) f[iNom] else ""
+                                val adr = if (iAdr >= 0 && f.size > iAdr && f[iAdr].isNotEmpty()) f[iAdr] else nom
+                                parsed.add(Borne(ll[0], ll[1], kw, enseigne, nom, adr))
+                                out.append(ll[0]).append(';').append(ll[1]).append(';')
+                                    .append(kw).append(';')
+                                    .append(enseigne.replace(';', ' ')).append(';')
+                                    .append(adr.replace(';', ' ')).append('\n')
+                            }
+                        }
+                    }
+                    n++
+                    if (n % 50000 == 0) log("Téléchargement IRVE : " + n + " lignes lues...")
+                }
+                synchronized(bornes) {
+                    bornes.clear()
+                    bornes.addAll(parsed)
+                }
+                bornesFile().writeText(out.toString())
+                getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
+                    .putLong("bornesDate", System.currentTimeMillis())
+                    .apply()
+                log("Base IRVE chargée : " + bornes.size + " bornes ≥ 22 kW (" + n + " lignes).")
+            } catch (e: Exception) {
+                log("Erreur base IRVE : " + e.message)
+            } finally {
+                bornesLoading = false
+            }
+        }
+    }
+
+    private fun showBornes() {
+        if (bornes.isEmpty()) {
+            if (!bornesLoading) {
+                log("Base des bornes vide : lancement du téléchargement initial.")
+                updateBornes(true)
+            } else {
+                log("Téléchargement en cours, retouchez « Bornes recharge » dans un instant.")
+            }
+            return
+        }
+        val loc = lastLoc
+        if (loc == null) {
+            log("Pas encore de position GPS : sortez ou attendez la fixation GPS.")
+            return
+        }
+        val filtres = arrayOf("Toutes (≥ 22 kW)", "≥ 50 kW", "≥ 100 kW", "≥ 150 kW")
+        AlertDialog.Builder(this)
+            .setTitle("Puissance minimale ?")
+            .setItems(filtres) { _, i ->
+                val minKw = when (i) {
+                    1 -> 50.0
+                    2 -> 100.0
+                    3 -> 150.0
+                    else -> 22.0
+                }
+                listBornes(minKw, loc)
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun listBornes(minKw: Double, loc: Location) {
+        class NearB(val b: Borne, val km: Double)
+        val arr: List<NearB>
+        synchronized(bornes) {
+            arr = bornes.filter { it.kw >= minKw }
+                .map { b ->
+                    val d = FloatArray(1)
+                    Location.distanceBetween(loc.latitude, loc.longitude, b.lat, b.lon, d)
+                    NearB(b, d[0] / 1000.0)
+                }
+                .sortedBy { it.km }
+                .take(50)
+        }
+        if (arr.isEmpty()) {
+            log("Aucune borne ≥ " + "%.0f".format(minKw) + " kW dans la base.")
+            return
+        }
+        val labels = arr.map {
+            val b = it.b
+            (if (b.enseigne.isNotEmpty()) b.enseigne else b.nom) + "\n" +
+                "%.1f".format(it.km) + " km - " + "%.0f".format(b.kw) + " kW - " +
+                b.adresse.take(38)
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Bornes ≥ " + "%.0f".format(minKw) + " kW (50 plus proches)")
+            .setItems(labels) { _, i -> borneAction(arr[i].b, arr[i].km) }
+            .setNegativeButton("Fermer", null)
+            .show()
+    }
+
+    private fun borneAction(b: Borne, km: Double) {
+        val opts = arrayOf("Insérer comme prochaine étape", "Ouvrir dans Google Maps")
+        AlertDialog.Builder(this)
+            .setTitle(b.enseigne)
+            .setMessage(
+                "Adresse : " + b.adresse + "\n" +
+                    "Puissance max : " + "%.0f".format(b.kw) + " kW\n" +
+                    "Distance : " + "%.1f".format(km) + " km (à vol d'oiseau)"
+            )
+            .setItems(opts) { _, which ->
+                when (which) {
+                    0 -> insertBorne(b, km)
+                    1 -> try {
+                        startActivity(
+                            Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://www.google.com/maps/search/?api=1&query=" + b.lat + "," + b.lon)
+                            )
+                        )
+                    } catch (e: Exception) {
+                        log("Maps indisponible : " + e.message)
+                    }
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun insertBorne(b: Borne, km: Double) {
+        val name = "Borne " + b.enseigne + " - " + b.adresse
+        val stageKm = if (tripActive && stageIdx < stages.size) {
+            (stages[stageIdx].km - (tripKm - stageStartKm)) + km
+        } else {
+            km
+        }
+        stages.add(stageIdx.coerceAtMost(stages.size), Stage(name, stageKm))
+        log("Borne insérée comme étape " + (stageIdx + 1) + " : " + name +
+            " (" + "%.0f".format(stageKm) + " km, distance à vol d'oiseau - ajustez si besoin).")
+        refreshRoute()
     }
 }
