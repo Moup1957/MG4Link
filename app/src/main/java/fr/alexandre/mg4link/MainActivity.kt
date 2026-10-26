@@ -245,7 +245,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.7 - non connecté"
+        statusTv.text = "MG4 Link v0.7.1 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -346,7 +346,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.7 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.7.1 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         if (hasAll()) startGps()
         thread(name = "bornes-cache") { loadBornesCache() }
     }
@@ -380,6 +380,17 @@ class MainActivity : Activity() {
                 logTv.text = t.substring(t.length - 25_000)
             }
             logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+        }
+    }
+
+    /** Petite boîte de dialogue d'information. */
+    private fun alert(titre: String, msg: String) {
+        handler.post {
+            AlertDialog.Builder(this)
+                .setTitle(titre)
+                .setMessage(msg)
+                .setPositiveButton("OK", null)
+                .show()
         }
     }
 
@@ -460,7 +471,23 @@ class MainActivity : Activity() {
 
         override fun onProviderEnabled(provider: String) {}
         override fun onProviderDisabled(provider: String) {}
-        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle) {}
+    }
+
+    /** Dernière position connue, même sans fixation GPS active (v0.7.1). */
+    private fun bestLoc(): Location? {
+        return try {
+            val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            listOf(
+                LocationManager.GPS_PROVIDER,
+                LocationManager.NETWORK_PROVIDER,
+                LocationManager.PASSIVE_PROVIDER
+            ).filter { lm.allProviders.contains(it) }
+                .mapNotNull { lm.getLastKnownLocation(it) }
+                .maxByOrNull { it.time }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun startGps() {
@@ -1162,7 +1189,7 @@ class MainActivity : Activity() {
         handler.post { tv.text = txt }
     }
 
-    // ------------------------------------------------------ Bornes IRVE v0.7
+    // ------------------------------------------------------ Bornes IRVE v0.7.1
 
     private fun bornesFile(): File = File(filesDir, "bornes_cache.txt")
 
@@ -1198,7 +1225,8 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun splitCsvLine(line: String): List<String> {
+    /** Découpe une ligne CSV en respectant les guillemets ; séparateur ';' ou ',' (v0.7.1). */
+    private fun splitCsvLine(line: String, sep: Char): List<String> {
         val out = ArrayList<String>()
         val cur = StringBuilder()
         var inQ = false
@@ -1219,7 +1247,7 @@ class MainActivity : Activity() {
             } else {
                 when (ch) {
                     '"' -> inQ = true
-                    ';' -> {
+                    sep -> {
                         out.add(cur.toString())
                         cur.setLength(0)
                     }
@@ -1306,6 +1334,7 @@ class MainActivity : Activity() {
                     .filter { it.contains("consolidation-etalab-schema-irve-statique") }
                 if (urls.isEmpty()) {
                     log("ERREUR : URL de la base IRVE introuvable - réessayez plus tard.")
+                    alert("Bornes", "URL de la base IRVE introuvable. Réessayez plus tard.")
                     return@thread
                 }
                 val best = urls.maxByOrNull { Regex("(\\d{8})").find(it)?.groupValues?.get(1) ?: "0" }!!
@@ -1313,8 +1342,10 @@ class MainActivity : Activity() {
 
                 val parsed = ArrayList<Borne>()
                 var header: List<String>? = null
+                var sep = ';'
                 var iCoord = -1
                 var iKw = -1
+                var iOper = -1
                 var iEnseigne = -1
                 var iNom = -1
                 var iAdr = -1
@@ -1322,23 +1353,33 @@ class MainActivity : Activity() {
                 var n = 0
                 downloadCsv(best) { line ->
                     if (header == null) {
-                        header = splitCsvLine(line)
+                        // Le CSV v2.3.1 utilise la virgule ; les anciens le point-virgule.
+                        sep = if (line.count { it == ';' } >= line.count { it == ',' }) ';' else ','
+                        header = splitCsvLine(line, sep)
                         iCoord = header!!.indexOf("coordonneesXY")
-                        iKw = header!!.indexOf("puissance_max")
+                        iKw = header!!.indexOf("puissance_nominale")
+                        if (iKw < 0) iKw = header!!.indexOf("puissance_max")
+                        iOper = header!!.indexOf("nom_operateur")
                         iEnseigne = header!!.indexOf("nom_enseigne")
                         iNom = header!!.indexOf("nom_station")
                         iAdr = header!!.indexOf("adresse_station")
-                        log("Colonnes IRVE : coordonnees=$iCoord puissance=$iKw enseigne=$iEnseigne")
+                        if (iCoord < 0 || iKw < 0) {
+                            log("Colonnes IRVE introuvables ! En-tête reçu (300 premiers caractères) : " +
+                                line.take(300))
+                        } else {
+                            log("Colonnes IRVE : coordonnees=$iCoord puissance=$iKw (" +
+                                header!![iKw] + ") opérateur=$iOper enseigne=$iEnseigne")
+                        }
                     } else if (iCoord >= 0 && iKw >= 0) {
-                        val f = splitCsvLine(line)
+                        val f = splitCsvLine(line, sep)
                         if (f.size > iCoord && f.size > iKw) {
                             val ll = parseCoord(f[iCoord])
                             val kw = f[iKw].replace(',', '.').toDoubleOrNull() ?: 0.0
                             if (ll != null && kw >= 22.0) {
-                                val enseigne = if (iEnseigne >= 0 && f.size > iEnseigne && f[iEnseigne].isNotEmpty()) {
-                                    f[iEnseigne]
-                                } else {
-                                    if (iNom >= 0 && f.size > iNom && f[iNom].isNotEmpty()) f[iNom] else "Opérateur ?"
+                                val enseigne = when {
+                                    iOper >= 0 && f.size > iOper && f[iOper].isNotEmpty() -> f[iOper]
+                                    iEnseigne >= 0 && f.size > iEnseigne && f[iEnseigne].isNotEmpty() -> f[iEnseigne]
+                                    else -> "Opérateur ?"
                                 }
                                 val nom = if (iNom >= 0 && f.size > iNom) f[iNom] else ""
                                 val adr = if (iAdr >= 0 && f.size > iAdr && f[iAdr].isNotEmpty()) f[iAdr] else nom
@@ -1362,8 +1403,13 @@ class MainActivity : Activity() {
                     .putLong("bornesDate", System.currentTimeMillis())
                     .apply()
                 log("Base IRVE chargée : " + bornes.size + " bornes ≥ 22 kW (" + n + " lignes).")
+                if (bornes.isEmpty()) {
+                    alert("Bornes", "La base a été téléchargée mais aucune borne ≥ 22 kW n'a été trouvée. " +
+                        "Copiez le journal et envoyez-le pour diagnostic.")
+                }
             } catch (e: Exception) {
                 log("Erreur base IRVE : " + e.message)
+                alert("Bornes", "Erreur pendant le téléchargement : " + e.message)
             } finally {
                 bornesLoading = false
             }
@@ -1374,15 +1420,21 @@ class MainActivity : Activity() {
         if (bornes.isEmpty()) {
             if (!bornesLoading) {
                 log("Base des bornes vide : lancement du téléchargement initial.")
+                alert("Bornes", "La base des bornes est vide : téléchargement lancé (1 à 2 min, Wi-Fi conseillé). " +
+                    "Retouchez « Bornes recharge » une fois le téléchargement terminé.")
                 updateBornes(true)
             } else {
                 log("Téléchargement en cours, retouchez « Bornes recharge » dans un instant.")
+                alert("Bornes", "Téléchargement en cours... retouchez « Bornes recharge » dans un instant.")
             }
             return
         }
-        val loc = lastLoc
+        // Dernière position connue même sans GPS actif (utile en garage) - v0.7.1
+        val loc = lastLoc ?: bestLoc()
         if (loc == null) {
             log("Pas encore de position GPS : sortez ou attendez la fixation GPS.")
+            alert("Position inconnue", "Aucune position disponible pour l'instant (normal en garage). " +
+                "Sortez dehors ou attendez la fixation GPS, puis retouchez « Bornes recharge ».")
             return
         }
         val filtres = arrayOf("Toutes (≥ 22 kW)", "≥ 50 kW", "≥ 100 kW", "≥ 150 kW")
@@ -1416,6 +1468,7 @@ class MainActivity : Activity() {
         }
         if (arr.isEmpty()) {
             log("Aucune borne ≥ " + "%.0f".format(minKw) + " kW dans la base.")
+            alert("Bornes", "Aucune borne ≥ " + "%.0f".format(minKw) + " kW dans la base.")
             return
         }
         val labels = arr.map {
