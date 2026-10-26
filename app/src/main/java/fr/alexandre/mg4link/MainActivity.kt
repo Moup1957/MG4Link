@@ -73,8 +73,13 @@ private fun propsText(p: Int): String {
 /** Appareil Bluetooth LE vu pendant le scan. */
 class Found(val dev: BluetoothDevice, var name: String, var rssi: Int)
 
-/** Étape d'un itinéraire : nom et distance prévue depuis l'étape précédente. */
-class Stage(val name: String, val km: Double)
+/** Étape d'un itinéraire : nom, distance prévue, et position GPS si géocodée (v0.8). */
+class Stage(val name: String, val km: Double, val lat: Double = 0.0, val lon: Double = 0.0) {
+    val hasPos: Boolean get() = lat != 0.0 || lon != 0.0
+}
+
+/** Position retournée par le géocodage d'une adresse. */
+class Geo(val lat: Double, val lon: Double)
 
 /** Borne de recharge issue de la base IRVE. */
 class Borne(val lat: Double, val lon: Double, val kw: Double, val enseigne: String, val nom: String, val adresse: String)
@@ -252,7 +257,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.7.2 - non connecté"
+        statusTv.text = "MG4 Link v0.8 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -354,7 +359,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.7.2 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.8 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -894,42 +899,127 @@ class MainActivity : Activity() {
 
     private fun editStages() {
         val input = EditText(this)
-        input.hint = "Une étape par ligne.\nFormats acceptés :\nReims;145\nReims : 145\n3 le haut fief 44190 Gorges;35\n(adresse complète : distance OBLIGATOIRE après ; ou :)"
+        input.hint = "Une étape par ligne.\nAvec distance : Reims;145\nSans distance (Internet) :\n3 le haut fief 44190 Gorges\n(ville, adresse complète... l'app calcule les km)"
         input.setSingleLine(false)
         input.minLines = 6
         input.gravity = Gravity.TOP
         input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-        input.setText(stages.joinToString("\n") { it.name + ";" + it.km })
+        input.setText(stages.joinToString("\n") { it.name + ";" + fmtKm(it.km) })
         AlertDialog.Builder(this)
             .setTitle("Définir l'itinéraire")
             .setView(input)
-            .setPositiveButton("OK") { _, _ ->
-                stages.clear()
-                val rejetees = ArrayList<String>()
-                for (line in input.text.toString().lines()) {
-                    if (line.isBlank()) continue
-                    val st = parseStage(line)
-                    if (st != null) {
-                        stages.add(st)
-                    } else {
-                        rejetees.add(line.trim())
-                        log("Ligne d'itinéraire non comprise : " + line.trim())
-                    }
-                }
-                log("Itinéraire : " + stages.size + " étape(s), total " +
-                    "%.0f".format(stages.sumOf { it.km }) + " km" +
-                    (if (rejetees.isNotEmpty()) " (" + rejetees.size + " ligne(s) ignorée(s))" else ""))
-                refreshRoute()
-                if (rejetees.isNotEmpty()) {
-                    alert(
-                        "Lignes ignorées (" + rejetees.size + ")",
-                        "Non comprises (il faut une distance après « ; » ou « : », ex. « adresse;35 ») :\n\n" +
-                            rejetees.joinToString("\n")
-                    )
-                }
-            }
+            .setPositiveButton("OK") { _, _ -> buildStages(input.text.toString()) }
             .setNegativeButton("Annuler", null)
             .show()
+    }
+
+    private fun fmtKm(km: Double): String =
+        if (km % 1.0 == 0.0) "%.0f".format(km) else "%.1f".format(km)
+
+    /**
+     * Construit l'itinéraire depuis le texte saisi (v0.8).
+     * Lignes avec distance (« Nom;km ») : utilisées telles quelles.
+     * Lignes sans distance : géocodées via OpenStreetMap (Nominatim),
+     * distance = vol d'oiseau depuis l'étape précédente (ou la position actuelle) × 1,2.
+     */
+    private fun buildStages(raw: String) {
+        val lines = raw.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.isEmpty()) return
+        val explicit = lines.map { parseStage(it) }
+        if (explicit.all { it != null }) {
+            applyStages(explicit.filterNotNull(), emptyList())
+            return
+        }
+        status("Géocodage des adresses (Internet)...")
+        log("Géocodage de " + lines.size + " ligne(s) via OpenStreetMap...")
+        thread(name = "geocode") {
+            val result = ArrayList<Stage>()
+            val fails = ArrayList<String>()
+            var prev: Geo? = null
+            for (line in lines) {
+                val st = parseStage(line)
+                if (st != null) {
+                    result.add(st)
+                    continue
+                }
+                val g = geocode(line)
+                if (g == null) {
+                    fails.add(line)
+                    log("Adresse introuvable : " + line)
+                    continue
+                }
+                var from = prev
+                if (from == null) {
+                    val l = lastLoc ?: bestLoc()
+                    if (l != null) from = Geo(l.latitude, l.longitude)
+                }
+                val km = if (from == null) 0.0 else distKm(from.lat, from.lon, g.lat, g.lon) * 1.2
+                result.add(Stage(line, km, g.lat, g.lon))
+                log("« " + line + " » localisé → " + "%.3f".format(g.lat) + ", " +
+                    "%.3f".format(g.lon) + "  (" + fmtKm(km) + " km estimés)")
+                prev = g
+                Thread.sleep(1100) // règle Nominatim : 1 requête/seconde maximum
+            }
+            handler.post { applyStages(result, fails) }
+        }
+    }
+
+    private fun applyStages(list: List<Stage>, fails: List<String>) {
+        stages.clear()
+        stages.addAll(list)
+        tripActive = false
+        stageIdx = 0
+        log("Itinéraire : " + stages.size + " étape(s), total " +
+            fmtKm(stages.sumOf { it.km }) + " km" +
+            (if (fails.isNotEmpty()) " (" + fails.size + " adresse(s) ignorée(s))" else ""))
+        refreshRoute()
+        status("Itinéraire : " + stages.size + " étape(s)")
+        if (fails.isNotEmpty()) {
+            alert(
+                "Adresses introuvables (" + fails.size + ")",
+                "Ces lignes n'ont pas été localisées et sont ignorées :\n\n" +
+                    fails.joinToString("\n") +
+                    "\n\nVérifie l'orthographe, ou ajoute la ville / le code postal."
+            )
+        }
+    }
+
+    /** Géocodage d'une adresse via Nominatim (OpenStreetMap, gratuit). */
+    private fun geocode(addr: String): Geo? {
+        return try {
+            val url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=0&q=" +
+                URLEncoder.encode(addr, "UTF-8")
+            val json = httpGet(url, 15000)
+            val lat = Regex("\"lat\"\\s*:\\s*\"(-?[0-9.]+)\"").find(json)?.groupValues?.get(1)
+                ?: return null
+            val lon = Regex("\"lon\"\\s*:\\s*\"(-?[0-9.]+)\"").find(json)?.groupValues?.get(1)
+                ?: return null
+            Geo(lat.toDouble(), lon.toDouble())
+        } catch (e: Exception) {
+            log("Géocodage de « " + addr + " » : " + e.message)
+            null
+        }
+    }
+
+    /** Distance à vol d'oiseau en km. */
+    private fun distKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val r = 6371.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2)
+        return 2 * r * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    }
+
+    /** Relecture d'un itinéraire sauvegardé : « nom;km;lat;lon ». */
+    private fun parseSaved(line: String): Stage? {
+        val p = line.split(';')
+        if (p.size < 2) return null
+        val km = p[1].replace(',', '.').toDoubleOrNull() ?: return null
+        val lat = if (p.size >= 3) p[2].replace(',', '.').toDoubleOrNull() ?: 0.0 else 0.0
+        val lon = if (p.size >= 4) p[3].replace(',', '.').toDoubleOrNull() ?: 0.0 else 0.0
+        return Stage(p[0], km, lat, lon)
     }
 
     // ------------------------------------------------- Itinéraires favoris
@@ -951,7 +1041,7 @@ class MainActivity : Activity() {
                     return@setPositiveButton
                 }
                 val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
-                val data = stages.joinToString("\n") { it.name + ";" + it.km }
+                val data = stages.joinToString("\n") { it.name + ";" + it.km + ";" + it.lat + ";" + it.lon }
                 val names = (prefs.getStringSet("names", null) ?: mutableSetOf()).toMutableSet()
                 names.add(name)
                 prefs.edit()
@@ -978,7 +1068,7 @@ class MainActivity : Activity() {
                 if (data != null) {
                     stages.clear()
                     for (line in data.lines()) {
-                        val st = parseStage(line)
+                        val st = parseSaved(line)
                         if (st != null) stages.add(st)
                     }
                     tripActive = false
@@ -1139,8 +1229,11 @@ class MainActivity : Activity() {
             return
         }
         try {
-            val dest = URLEncoder.encode(stages.last().name, "UTF-8")
-            val wps = stages.dropLast(1).take(9).joinToString("%7C") { URLEncoder.encode(it.name, "UTF-8") }
+            // Une étape géocodée est envoyée par ses coordonnées (plus fiable que le texte).
+            fun wp(s: Stage): String =
+                if (s.hasPos) "${s.lat},${s.lon}" else URLEncoder.encode(s.name, "UTF-8")
+            val dest = wp(stages.last())
+            val wps = stages.dropLast(1).take(9).joinToString("%7C") { wp(it) }
             val url = "https://www.google.com/maps/dir/?api=1&destination=" + dest +
                 (if (wps.isNotEmpty()) "&waypoints=" + wps else "")
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
@@ -1290,25 +1383,46 @@ class MainActivity : Activity() {
         if (!f.exists()) return
         try {
             val lst = ArrayList<Borne>()
-            f.forEachLine { line ->
-                val p = line.split(';')
-                if (p.size >= 5) {
-                    val lat = p[0].toDoubleOrNull() ?: return@forEachLine
-                    val lon = p[1].toDoubleOrNull() ?: return@forEachLine
-                    val kw = p[2].toDoubleOrNull() ?: return@forEachLine
-                    lst.add(Borne(lat, lon, kw, p[3], p[3], p[4]))
-                }
-            }
+            f.forEachLine { line -> parseBorneCache(line)?.let { lst.add(it) } }
             if (lst.isNotEmpty()) {
                 synchronized(bornes) {
                     bornes.clear()
                     bornes.addAll(lst)
                 }
-                log("Base IRVE en cache : " + bornes.size + " bornes (mise à jour il y a " +
+                log("Base IRVE France en cache : " + lst.size + " bornes (maj il y a " +
                     (bornesAgeMs() / 3600000L) + " h).")
             }
+            loadBornesIberia()
         } catch (e: Exception) {
             log("Cache IRVE illisible : " + e.message)
+        }
+    }
+
+    /** Une ligne de cache : « lat;lon;kw;enseigne;adresse ». */
+    private fun parseBorneCache(line: String): Borne? {
+        val p = line.split(';')
+        if (p.size < 5) return null
+        val lat = p[0].toDoubleOrNull() ?: return null
+        val lon = p[1].toDoubleOrNull() ?: return null
+        val kw = p[2].toDoubleOrNull() ?: return null
+        return Borne(lat, lon, kw, p[3], p[3], p[4])
+    }
+
+    /** Bornes Espagne/Portugal en cache (v0.8). */
+    private fun bornesIberiaFile(): File = File(filesDir, "bornes_iberia.txt")
+
+    private fun loadBornesIberia() {
+        val f = bornesIberiaFile()
+        if (!f.exists()) return
+        try {
+            val lst = ArrayList<Borne>()
+            f.forEachLine { line -> parseBorneCache(line)?.let { lst.add(it) } }
+            if (lst.isNotEmpty()) {
+                synchronized(bornes) { bornes.addAll(lst) }
+                log("Bornes Espagne/Portugal en cache : " + lst.size)
+            }
+        } catch (e: Exception) {
+            log("Cache Espagne/Portugal illisible : " + e.message)
         }
     }
 
@@ -1362,7 +1476,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.8 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1383,7 +1497,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.8 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -1489,7 +1603,10 @@ class MainActivity : Activity() {
                 getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
                     .putLong("bornesDate", System.currentTimeMillis())
                     .apply()
-                log("Base IRVE chargée : " + bornes.size + " bornes ≥ 22 kW (" + n + " lignes).")
+                log("Base IRVE France chargée : " + bornes.size + " bornes ≥ 22 kW (" + n + " lignes).")
+                // Espagne + Portugal (v0.8) via OpenStreetMap
+                updateBornesIberia()
+                log("Base complète chargée : " + bornes.size + " bornes (France + Espagne + Portugal).")
                 if (bornes.isEmpty()) {
                     alert("Bornes", "La base a été téléchargée mais aucune borne ≥ 22 kW n'a été trouvée. " +
                         "Copiez le journal et envoyez-le pour diagnostic.")
@@ -1501,6 +1618,99 @@ class MainActivity : Activity() {
                 bornesLoading = false
             }
         }
+    }
+
+    /**
+     * Bornes Espagne + Portugal (v0.8) via l'API Overpass (OpenStreetMap).
+     * Les registres officiels RIPREE / MOBI.E n'ont pas de téléchargement CSV
+     * direct et stable : OpenStreetMap est gratuit, sans clé et mis à jour
+     * par la communauté. Puissance lue depuis les tags « maxpower » ou
+     * « socket:type2_combo:output ».
+     */
+    private fun updateBornesIberia(): Int {
+        val zones = listOf(
+            "Espagne" to doubleArrayOf(35.0, -9.9, 43.9, 4.5),
+            "Portugal" to doubleArrayOf(36.5, -9.9, 42.3, -6.0)
+        )
+        val out = StringBuilder()
+        var total = 0
+        for ((pays, bb) in zones) {
+            try {
+                val bbox = fmtD(bb[0]) + "," + fmtD(bb[1]) + "," + fmtD(bb[2]) + "," + fmtD(bb[3])
+                val q = "[out:csv(::lat,::lon,\"maxpower\",\"socket:type2_combo:output\"," +
+                    "\"operator\",\"name\",\"addr:street\",\"addr:housenumber\",\"addr:city\";true;\",\")]" +
+                    "[timeout:180];node[\"amenity\"=\"charging_station\"](" + bbox + ");out;"
+                val url = "https://overpass-api.de/api/interpreter?data=" + URLEncoder.encode(q, "UTF-8")
+                log("Téléchargement des bornes " + pays + " (OpenStreetMap)...")
+                var header: List<String>? = null
+                var count = 0
+                val parsed = ArrayList<Borne>()
+                downloadCsv(url) { line ->
+                    if (header == null) {
+                        header = splitCsvLine(line, ',')
+                    } else {
+                        val b = overpassToBorne(splitCsvLine(line, ','), header!!, pays)
+                        if (b != null) {
+                            parsed.add(b)
+                            count++
+                            out.append(cacheLine(b))
+                        }
+                    }
+                }
+                synchronized(bornes) { bornes.addAll(parsed) }
+                log("Bornes " + pays + " : " + count + " bornes ≥ 22 kW ajoutées.")
+                total += count
+            } catch (e: Exception) {
+                log("Erreur bornes " + pays + " : " + e.message)
+            }
+        }
+        if (out.isNotEmpty()) {
+            bornesIberiaFile().writeText(out.toString())
+            getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
+                .putLong("iberiaDate", System.currentTimeMillis())
+                .apply()
+        }
+        return total
+    }
+
+    private fun fmtD(v: Double): String = String.format(Locale.US, "%.4f", v)
+
+    private fun cacheLine(b: Borne): String =
+        b.lat.toString() + ";" + b.lon + ";" + b.kw + ";" +
+            b.enseigne.replace(';', ' ') + ";" + b.adresse.replace(';', ' ') + "\n"
+
+    /** Extrait une puissance en kW d'un tag OSM (« 50 kW », « 22000 W », « 150 »...). */
+    private fun kwFromTag(s: String): Double {
+        val m = Regex("([0-9]+(?:[.,][0-9]+)?)\\s*(kW|W)?").find(s.trim()) ?: return 0.0
+        var v = m.groupValues[1].replace(',', '.').toDoubleOrNull() ?: return 0.0
+        if (m.groupValues[2] == "W") v /= 1000.0
+        return v
+    }
+
+    /** Convertit une ligne CSV Overpass en borne ; null si puissance < 22 kW. */
+    private fun overpassToBorne(f: List<String>, h: List<String>, pays: String): Borne? {
+        val iLat = h.indexOf("::lat")
+        val iLon = h.indexOf("::lon")
+        if (iLat < 0 || iLon < 0 || f.size <= iLat || f.size <= iLon) return null
+        val lat = f[iLat].toDoubleOrNull() ?: return null
+        val lon = f[iLon].toDoubleOrNull() ?: return null
+        fun tag(name: String): String {
+            val i = h.indexOf(name)
+            return if (i >= 0 && f.size > i) f[i] else ""
+        }
+        var kw = kwFromTag(tag("maxpower"))
+        if (kw < 22.0) kw = kwFromTag(tag("socket:type2_combo:output"))
+        if (kw < 22.0) return null
+        val operator = tag("operator")
+        val name = tag("name")
+        val enseigne = pays + " - " + when {
+            operator.isNotEmpty() -> operator
+            name.isNotEmpty() -> name
+            else -> "Opérateur ?"
+        }
+        val adr = listOf(tag("addr:housenumber"), tag("addr:street"), tag("addr:city"))
+            .filter { it.isNotEmpty() }.joinToString(", ")
+        return Borne(lat, lon, kw, enseigne, name, if (adr.isNotEmpty()) adr else name)
     }
 
     private fun showBornes() {
@@ -1600,13 +1810,13 @@ class MainActivity : Activity() {
     }
 
     private fun insertBorne(b: Borne, km: Double) {
-        val name = "Borne " + b.enseigne + " - " + b.adresse
+        val name = ("Borne " + b.enseigne + " - " + b.adresse).replace(';', ' ').replace('\n', ' ')
         val stageKm = if (tripActive && stageIdx < stages.size) {
             (stages[stageIdx].km - (tripKm - stageStartKm)) + km
         } else {
             km
         }
-        stages.add(stageIdx.coerceAtMost(stages.size), Stage(name, stageKm))
+        stages.add(stageIdx.coerceAtMost(stages.size), Stage(name, stageKm, b.lat, b.lon))
         log("Borne insérée comme étape " + (stageIdx + 1) + " : " + name +
             " (" + "%.0f".format(stageKm) + " km, distance à vol d'oiseau - ajustez si besoin).")
         refreshRoute()
