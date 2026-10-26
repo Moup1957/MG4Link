@@ -231,7 +231,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.5 - non connecté"
+        statusTv.text = "MG4 Link v0.6 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -278,6 +278,13 @@ class MainActivity : Activity() {
             )
         )
 
+        root.addView(
+            row(
+                makeButton("Sauver itinéraire") { saveItinerary() },
+                makeButton("Charger itinéraire") { loadItinerary() }
+            )
+        )
+
         routeTv = TextView(this)
         routeTv.typeface = Typeface.MONOSPACE
         routeTv.textSize = 12f
@@ -318,7 +325,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.5 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.6 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         if (hasAll()) startGps()
     }
 
@@ -355,7 +362,9 @@ class MainActivity : Activity() {
     }
 
     private fun refreshLive() {
-        val txt = "Charge (PID 5B, à valider) : $soc\n" +
+        val autonomie = if (socPct >= 0) "%.0f".format(socPct / consoPctPerKm) + " km" else "?"
+        val txt = "Charge (PID 5B) : $soc\n" +
+            "Autonomie estimée : $autonomie\n" +
             "Odomètre (PID A6) : $odo\n" +
             "Vitesse (OBD 010D) : $obdSpeed\n" +
             "Tension 12 V (ATRV) : $volt\n" +
@@ -734,7 +743,7 @@ class MainActivity : Activity() {
             val cmds = listOf(
                 "ATI", "AT@1", "ATRV", "ATDP",
                 "0100", "0120", "0140", "0160", "0180", "01A0", "01C0",
-                "0101", "0902"
+                "0101", "0902", "015C"
             )
             for (c in cmds) {
                 log("> $c\n" + elm.request(c, 8000))
@@ -751,7 +760,7 @@ class MainActivity : Activity() {
         thread(name = "tests2") {
             log("> ATH1 (affiche l'adresse de chaque calculateur)\n" + elm.request("ATH1", 3000))
             val cmds = listOf(
-                "0100", "015B", "01A6", "0142", "0146", "0149",
+                "0100", "015B", "015C", "01A6", "0142", "0146", "0149",
                 "0105", "0104", "010C", "010D"
             )
             for (c in cmds) {
@@ -820,6 +829,68 @@ class MainActivity : Activity() {
                     "%.0f".format(stages.sumOf { it.km }) + " km" +
                     (if (rejets > 0) " (" + rejets + " ligne(s) ignorée(s))" else ""))
                 refreshRoute()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    // ------------------------------------------------- Itinéraires favoris
+
+    private fun saveItinerary() {
+        if (stages.isEmpty()) {
+            log("Aucun itinéraire à sauvegarder : définissez-le d'abord.")
+            return
+        }
+        val input = EditText(this)
+        input.hint = "Nom de l'itinéraire"
+        AlertDialog.Builder(this)
+            .setTitle("Sauvegarder l'itinéraire")
+            .setView(input)
+            .setPositiveButton("Sauver") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isEmpty()) {
+                    log("Nom vide : itinéraire non sauvegardé.")
+                    return@setPositiveButton
+                }
+                val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+                val data = stages.joinToString("\n") { it.name + ";" + it.km }
+                val names = (prefs.getStringSet("names", null) ?: mutableSetOf()).toMutableSet()
+                names.add(name)
+                prefs.edit()
+                    .putString("it:" + name.lowercase(Locale.ROOT), data)
+                    .putStringSet("names", names)
+                    .apply()
+                log("Itinéraire « " + name + " » sauvegardé (" + stages.size + " étapes).")
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun loadItinerary() {
+        val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+        val names = ((prefs.getStringSet("names", null) ?: mutableSetOf())).sorted()
+        if (names.isEmpty()) {
+            log("Aucun itinéraire sauvegardé pour l'instant.")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Charger un itinéraire")
+            .setItems(names.toTypedArray()) { _, i ->
+                val data = prefs.getString("it:" + names[i].lowercase(Locale.ROOT), null)
+                if (data != null) {
+                    stages.clear()
+                    for (line in data.lines()) {
+                        val st = parseStage(line)
+                        if (st != null) stages.add(st)
+                    }
+                    tripActive = false
+                    stageIdx = 0
+                    log("Itinéraire « " + names[i] + " » chargé (" + stages.size + " étapes, total " +
+                        "%.0f".format(stages.sumOf { it.km }) + " km).")
+                    refreshRoute()
+                } else {
+                    log("Itinéraire « " + names[i] + " illisible.")
+                }
             }
             .setNegativeButton("Annuler", null)
             .show()
@@ -1049,6 +1120,9 @@ class MainActivity : Activity() {
         val sc = socPct
         val sb = StringBuilder()
         sb.append("⚡ ").append(if (sc >= 0) "%.1f".format(sc) + " %" else "-- %")
+        if (sc >= 0) {
+            sb.append('\n').append("autonomie ").append("%.0f".format(sc / consoPctPerKm)).append(" km")
+        }
         if (tripActive && stageIdx < stages.size) {
             val s = stages[stageIdx]
             val remain = (s.km - (tripKm - stageStartKm)).coerceAtLeast(0.0)
