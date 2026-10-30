@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.INTERNET" />
 
@@ -13,6 +14,8 @@
 
     <application
         android:allowBackup="false"
+        android:icon="@drawable/icone_mg"
+        android:roundIcon="@drawable/icone_mg"
         android:label="MG4 Link"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity
