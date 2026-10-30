@@ -1887,21 +1887,6 @@ class MainActivity : Activity() {
         }
         // Zone de recherche (v0.10) : autour de ma position ou autour de la prochaine étape.
         val nextStage = stages.getOrNull(if (tripActive) stageIdx else 0)
-        fun chooseRadius(center: Location, zoneLabel: String) {
-            val rayons = arrayOf("5 km", "10 km", "25 km")
-            AlertDialog.Builder(this)
-                .setTitle("Rayon de recherche (" + zoneLabel + ")")
-                .setItems(rayons) { _, i ->
-                    val r = when (i) {
-                        1 -> 10.0
-                        2 -> 25.0
-                        else -> 5.0
-                    }
-                    choosePower(center, zoneLabel, r)
-                }
-                .setNegativeButton("Annuler", null)
-                .show()
-        }
         fun choosePower(center: Location, zoneLabel: String, radiusKm: Double) {
             val filtres = arrayOf("Toutes (≥ 22 kW)", "≥ 50 kW", "≥ 100 kW", "≥ 150 kW")
             AlertDialog.Builder(this)
@@ -1914,6 +1899,21 @@ class MainActivity : Activity() {
                         else -> 22.0
                     }
                     listBornes(minKw, center, radiusKm, zoneLabel)
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+        fun chooseRadius(center: Location, zoneLabel: String) {
+            val rayons = arrayOf("5 km", "10 km", "25 km")
+            AlertDialog.Builder(this)
+                .setTitle("Rayon de recherche (" + zoneLabel + ")")
+                .setItems(rayons) { _, i ->
+                    val r = when (i) {
+                        1 -> 10.0
+                        2 -> 25.0
+                        else -> 5.0
+                    }
+                    choosePower(center, zoneLabel, r)
                 }
                 .setNegativeButton("Annuler", null)
                 .show()
