@@ -270,7 +270,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.9 - non connecté"
+        statusTv.text = "MG4 Link v0.10 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -374,7 +374,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.9 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.10 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1620,7 +1620,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.9 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.10 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1641,7 +1641,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.9 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.10 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -1885,31 +1885,73 @@ class MainActivity : Activity() {
             }
             return
         }
-        // Dernière position connue même sans GPS actif (utile en garage) - v0.7.1
-        val loc = lastLoc ?: bestLoc()
-        if (loc == null) {
-            log("Pas encore de position GPS : sortez ou attendez la fixation GPS.")
-            alert("Position inconnue", "Aucune position disponible pour l'instant (normal en garage). " +
-                "Sortez dehors ou attendez la fixation GPS, puis retouchez « Bornes recharge ».")
-            return
-        }
-        val filtres = arrayOf("Toutes (≥ 22 kW)", "≥ 50 kW", "≥ 100 kW", "≥ 150 kW")
-        AlertDialog.Builder(this)
-            .setTitle("Puissance minimale ?")
-            .setItems(filtres) { _, i ->
-                val minKw = when (i) {
-                    1 -> 50.0
-                    2 -> 100.0
-                    3 -> 150.0
-                    else -> 22.0
+        // Zone de recherche (v0.10) : autour de ma position ou autour de la prochaine étape.
+        val nextStage = stages.getOrNull(if (tripActive) stageIdx else 0)
+        fun chooseRadius(center: Location, zoneLabel: String) {
+            val rayons = arrayOf("5 km", "10 km", "25 km")
+            AlertDialog.Builder(this)
+                .setTitle("Rayon de recherche (" + zoneLabel + ")")
+                .setItems(rayons) { _, i ->
+                    val r = when (i) {
+                        1 -> 10.0
+                        2 -> 25.0
+                        else -> 5.0
+                    }
+                    choosePower(center, zoneLabel, r)
                 }
-                listBornes(minKw, loc)
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+        fun choosePower(center: Location, zoneLabel: String, radiusKm: Double) {
+            val filtres = arrayOf("Toutes (≥ 22 kW)", "≥ 50 kW", "≥ 100 kW", "≥ 150 kW")
+            AlertDialog.Builder(this)
+                .setTitle("Puissance minimale ?")
+                .setItems(filtres) { _, i ->
+                    val minKw = when (i) {
+                        1 -> 50.0
+                        2 -> 100.0
+                        3 -> 150.0
+                        else -> 22.0
+                    }
+                    listBornes(minKw, center, radiusKm, zoneLabel)
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+        if (nextStage != null && nextStage.hasPos) {
+            val opts = ArrayList<String>()
+            val here = lastLoc ?: bestLoc()
+            if (here != null) opts.add("Autour de ma position")
+            opts.add("Autour de « " + nextStage.name.take(30) + " » (étape " +
+                ((if (tripActive) stageIdx else 0) + 1) + ")")
+            AlertDialog.Builder(this)
+                .setTitle("Bornes autour de quoi ?")
+                .setItems(opts.toTypedArray()) { _, i ->
+                    if (i == 0 && here != null) {
+                        chooseRadius(here, "autour de moi")
+                    } else {
+                        val c = Location("stage")
+                        c.latitude = nextStage.lat
+                        c.longitude = nextStage.lon
+                        chooseRadius(c, "autour de « " + nextStage.name.take(30) + " »")
+                    }
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        } else {
+            // Dernière position connue même sans GPS actif (utile en garage) - v0.7.1
+            val loc = lastLoc ?: bestLoc()
+            if (loc == null) {
+                log("Pas encore de position GPS : sortez ou attendez la fixation GPS.")
+                alert("Position inconnue", "Aucune position disponible pour l'instant (normal en garage). " +
+                    "Sortez dehors ou attendez la fixation GPS, puis retouchez « Bornes recharge ».")
+                return
             }
-            .setNegativeButton("Annuler", null)
-            .show()
+            chooseRadius(loc, "autour de moi")
+        }
     }
 
-    private fun listBornes(minKw: Double, loc: Location) {
+    private fun listBornes(minKw: Double, loc: Location, radiusKm: Double, zoneLabel: String) {
         class NearB(val b: Borne, val km: Double)
         val arr: List<NearB>
         synchronized(bornes) {
@@ -1919,12 +1961,15 @@ class MainActivity : Activity() {
                     Location.distanceBetween(loc.latitude, loc.longitude, b.lat, b.lon, d)
                     NearB(b, d[0] / 1000.0)
                 }
+                .filter { it.km <= radiusKm }
                 .sortedBy { it.km }
                 .take(50)
         }
         if (arr.isEmpty()) {
-            log("Aucune borne ≥ " + "%.0f".format(minKw) + " kW dans la base.")
-            alert("Bornes", "Aucune borne ≥ " + "%.0f".format(minKw) + " kW dans la base.")
+            log("Aucune borne ≥ " + "%.0f".format(minKw) + " kW à moins de " +
+                "%.0f".format(radiusKm) + " km " + zoneLabel + ".")
+            alert("Bornes", "Aucune borne ≥ " + "%.0f".format(minKw) + " kW à moins de " +
+                "%.0f".format(radiusKm) + " km " + zoneLabel + ".")
             return
         }
         val labels = arr.map {
@@ -1934,7 +1979,8 @@ class MainActivity : Activity() {
                 b.adresse.take(38)
         }.toTypedArray()
         AlertDialog.Builder(this)
-            .setTitle("Bornes ≥ " + "%.0f".format(minKw) + " kW (50 plus proches)")
+            .setTitle("Bornes ≥ " + "%.0f".format(minKw) + " kW, " +
+                "%.0f".format(radiusKm) + " km max, " + zoneLabel)
             .setItems(labels) { _, i -> borneAction(arr[i].b, arr[i].km) }
             .setNegativeButton("Fermer", null)
             .show()
@@ -1970,14 +2016,18 @@ class MainActivity : Activity() {
 
     private fun insertBorne(b: Borne, km: Double) {
         val name = ("Borne " + b.enseigne + " - " + b.adresse).replace(';', ' ').replace('\n', ' ')
-        val stageKm = if (tripActive && stageIdx < stages.size) {
-            (stages[stageIdx].km - (tripKm - stageStartKm)) + km
-        } else {
-            km
+        // Distance routière réelle depuis la position actuelle si possible (v0.10),
+        // sinon estimation depuis l'étape en cours.
+        val here = lastLoc ?: bestLoc()
+        val stageKm = when {
+            here != null -> roadKm(Geo(here.latitude, here.longitude), Geo(b.lat, b.lon))
+            tripActive && stageIdx < stages.size ->
+                (stages[stageIdx].km - (tripKm - stageStartKm)) + km
+            else -> km
         }
         stages.add(stageIdx.coerceAtMost(stages.size), Stage(name, stageKm, b.lat, b.lon))
         log("Borne insérée comme étape " + (stageIdx + 1) + " : " + name +
-            " (" + "%.0f".format(stageKm) + " km, distance à vol d'oiseau - ajustez si besoin).")
+            " (" + fmtKm(stageKm) + " km, distance routière).")
         refreshRoute()
     }
 }
