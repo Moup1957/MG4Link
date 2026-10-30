@@ -1953,9 +1953,8 @@ class MainActivity : Activity() {
 
     private fun listBornes(minKw: Double, loc: Location, radiusKm: Double, zoneLabel: String) {
         class NearB(val b: Borne, val km: Double)
-        val arr: List<NearB>
-        synchronized(bornes) {
-            arr = bornes.filter { it.kw >= minKw }
+        val arr: List<NearB> = synchronized(bornes) {
+            bornes.filter { it.kw >= minKw }
                 .map { b ->
                     val d = FloatArray(1)
                     Location.distanceBetween(loc.latitude, loc.longitude, b.lat, b.lon, d)
