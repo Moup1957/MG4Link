@@ -168,6 +168,8 @@ class MainActivity : Activity() {
     @Volatile
     private var liveOn = false
     private var liveThread: Thread? = null
+    private var liveGen = 0
+    private lateinit var liveSwitch: Switch
 
     @Volatile
     private var obdSpeed = "-"
@@ -270,7 +272,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.10 - non connecté"
+        statusTv.text = "MG4 Link v0.11 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -284,7 +286,7 @@ class MainActivity : Activity() {
             )
         )
 
-        val liveSwitch = Switch(this)
+        liveSwitch = Switch(this)
         liveSwitch.text = "Lecture live"
         liveSwitch.setOnCheckedChangeListener { _, on -> setLive(on) }
         root.addView(
@@ -374,7 +376,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.10 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.11 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -393,7 +395,7 @@ class MainActivity : Activity() {
             while (true) {
                 Thread.sleep(5000)
                 if (liveOn && ready && System.currentTimeMillis() - lastLiveTick > 15000) {
-                    log("Lecture live bloquée (plus de réponse depuis 15 s) - redémarrage automatique.")
+                    log("Lecture live sans réponse OBD depuis 15 s - redémarrage automatique.")
                     startLiveThread()
                 }
             }
@@ -771,6 +773,8 @@ class MainActivity : Activity() {
             log("> 0100 (détection du protocole, peut durer quelques secondes)\n" + elm.request("0100", 12000))
             log("> ATDP\n" + elm.request("ATDP", 3000))
             ready = true
+            // v0.11 : la lecture live démarre toute seule dès que le dongle est prêt.
+            if (!liveSwitch.isChecked) handler.post { liveSwitch.isChecked = true }
             status("Prêt - dongle connecté")
             log("Initialisation terminée.")
         } catch (e: Exception) {
@@ -795,18 +799,31 @@ class MainActivity : Activity() {
         liveOn = on
         if (!on) return
         if (liveThread?.isAlive == true) return
+        log("Lecture live démarrée.")
         startLiveThread()
     }
 
     /** Lance le fil de lecture live (relançable par le watchdog). */
     private fun startLiveThread() {
+        // v0.11 : numéro de génération - un redémarrage par le watchdog fait
+        // sortir proprement l'ancien fil de sa boucle (plus de fils en double).
+        val myGen = ++liveGen
         liveThread = thread(name = "live") {
-            while (liveOn) {
-                lastLiveTick = System.currentTimeMillis()
+            var noData = 0
+            while (liveOn && myGen == liveGen) {
                 try {
                     if (ready) {
                         val s = elm.request("010D", 2500)
                         val b = hexAfter(s, "410D", 1)
+                        // v0.11 : le "tick" du watchdog n'est rafraîchi QUE si la
+                        // voiture répond vraiment (avant, il l'était à chaque tour,
+                        // même sans réponse, donc le watchdog ne se déclenchait jamais).
+                        if (s.contains("41")) {
+                            lastLiveTick = System.currentTimeMillis()
+                            noData = 0
+                        } else if (++noData == 10) {
+                            log("OBD sans réponse : 010D → \"$s\"")
+                        }
                         obdSpeed = if (b != null) "${b[0]} km/h" else "pas de réponse ($s)"
                         volt = elm.request("ATRV", 2500)
                         val s5 = hexAfter(elm.request("015B", 2500), "415B", 1)
@@ -1620,7 +1637,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.10 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.11 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1641,7 +1658,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.10 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.11 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
