@@ -169,6 +169,9 @@ class MainActivity : Activity() {
     private var liveOn = false
     private var liveThread: Thread? = null
     private var liveGen = 0
+
+    @Volatile
+    private var needElmReinit = false
     private lateinit var liveSwitch: Switch
 
     @Volatile
@@ -272,7 +275,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.11 - non connecté"
+        statusTv.text = "MG4 Link v0.12 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -376,7 +379,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.11 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.12 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -395,8 +398,17 @@ class MainActivity : Activity() {
             while (true) {
                 Thread.sleep(5000)
                 if (liveOn && ready && System.currentTimeMillis() - lastLiveTick > 15000) {
-                    log("Lecture live sans réponse OBD depuis 15 s - redémarrage automatique.")
-                    startLiveThread()
+                    if (liveThread?.isAlive == true) {
+                        // v0.12 : le fil vit mais la voiture ne répond plus → on demande
+                        // au fil de réinitialiser le dongle ELM327 (une seule fois, pas de spam).
+                        if (!needElmReinit) {
+                            log("Lecture live sans réponse OBD depuis 15 s - réinitialisation du dongle demandée.")
+                            needElmReinit = true
+                        }
+                    } else {
+                        log("Fil de lecture live arrêté - redémarrage automatique.")
+                        startLiveThread()
+                    }
                 }
             }
         }
@@ -653,6 +665,8 @@ class MainActivity : Activity() {
     private fun disconnect() {
         liveOn = false
         ready = false
+        liveGen++          // v0.12 : fait sortir l'ancien fil de lecture de sa boucle
+        needElmReinit = false
         try {
             gatt?.disconnect()
             gatt?.close()
@@ -773,8 +787,11 @@ class MainActivity : Activity() {
             log("> 0100 (détection du protocole, peut durer quelques secondes)\n" + elm.request("0100", 12000))
             log("> ATDP\n" + elm.request("ATDP", 3000))
             ready = true
-            // v0.11 : la lecture live démarre toute seule dès que le dongle est prêt.
-            if (!liveSwitch.isChecked) handler.post { liveSwitch.isChecked = true }
+            // v0.12 : la lecture live démarre ou REdémarre dès que le dongle est prêt,
+            // même si l'interrupteur était déjà sur ON (cas de la reconnexion après
+            // une déconnexion : avant, rien ne relançait la lecture).
+            if (liveSwitch.isChecked) setLive(true)
+            else handler.post { liveSwitch.isChecked = true }
             status("Prêt - dongle connecté")
             log("Initialisation terminée.")
         } catch (e: Exception) {
@@ -812,6 +829,17 @@ class MainActivity : Activity() {
             var noData = 0
             while (liveOn && myGen == liveGen) {
                 try {
+                    if (ready && needElmReinit) {
+                        // v0.12 : auto-réparation - si la voiture ne répond plus, on
+                        // réinitialise le dongle (ATZ...) puis on relance la détection.
+                        needElmReinit = false
+                        log("Réinitialisation du dongle ELM327...")
+                        for (cmd in listOf("ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATSP0")) {
+                            elm.request(cmd, if (cmd == "ATZ") 5000L else 3000L)
+                        }
+                        elm.request("0100", 12000)
+                        lastLiveTick = System.currentTimeMillis()
+                    }
                     if (ready) {
                         val s = elm.request("010D", 2500)
                         val b = hexAfter(s, "410D", 1)
@@ -1637,7 +1665,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.11 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.12 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1658,7 +1686,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.11 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.12 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
