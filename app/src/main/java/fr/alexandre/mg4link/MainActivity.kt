@@ -32,6 +32,8 @@ import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -211,6 +213,11 @@ class MainActivity : Activity() {
     private var stageStartSoc = -1.0
     private var lowWarned = false
 
+    // v0.13 : reste à parcourir recalculé par la route depuis la position
+    // actuelle (comme un GPS). -1 = pas encore calculé.
+    @Volatile
+    private var remainKm = -1.0
+
     // Apprentissage continu (v0.7.2)
     @Volatile
     private var learnKm = 0.0
@@ -275,7 +282,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.12 - non connecté"
+        statusTv.text = "MG4 Link v0.13 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -339,6 +346,12 @@ class MainActivity : Activity() {
             )
         )
 
+        root.addView(
+            row(
+                makeButton("Carte bornes…") { showBornesMap() }
+            )
+        )
+
         routeTv = TextView(this)
         routeTv.typeface = Typeface.MONOSPACE
         routeTv.textSize = 12f
@@ -379,7 +392,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.12 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.13 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -408,6 +421,40 @@ class MainActivity : Activity() {
                     } else {
                         log("Fil de lecture live arrêté - redémarrage automatique.")
                         startLiveThread()
+                    }
+                }
+            }
+        }
+        // v0.13 : recalcul routier périodique du reste à parcourir (comme un GPS).
+        // Si vous empruntez un autre itinéraire que celui estimé au départ, la
+        // distance restante et la charge prévue à l'arrivée se recalent toutes seules.
+        thread(name = "reste-gps") {
+            var lastStage = -1
+            var lastKm = -999.0
+            while (true) {
+                Thread.sleep(30000)
+                val idx = if (tripActive) stageIdx else -1
+                val st = stages.getOrNull(idx)
+                val loc = lastLoc
+                if (tripActive && st != null && st.hasPos && loc != null) {
+                    if (idx != lastStage) {
+                        lastStage = idx
+                        lastKm = -999.0
+                    }
+                    val km = roadKm(Geo(loc.latitude, loc.longitude), Geo(st.lat, st.lon))
+                    if (km > 0 && Math.abs(km - lastKm) >= 1.0) {
+                        remainKm = km
+                        lastKm = km
+                        log("Reste " + fmtKm(km) + " km par la route jusqu'à « " +
+                            st.name.take(30) + " » (recalculé).")
+                        if (km <= 1.0) {
+                            handler.post { finishStage(false) }
+                        } else {
+                            handler.post {
+                                refreshRoute()
+                                refreshOverlay()
+                            }
+                        }
                     }
                 }
             }
@@ -1402,7 +1449,12 @@ class MainActivity : Activity() {
                     .append(" (").append("%.0f".format(s.km)).append(" km) → ").append(pred).append('\n')
             }
             if (tripActive && stageIdx < stages.size) {
-                sb.append("Reste " + "%.1f".format(stages[stageIdx].km - (tripKm - stageStartKm)) +
+                // v0.13 : priorité au reste recalculé par la route depuis la position
+                // actuelle ; repli sur l'estimation initiale si pas encore calculée.
+                val remain =
+                    if (stages[stageIdx].hasPos && remainKm >= 0.0) remainKm
+                    else (stages[stageIdx].km - (tripKm - stageStartKm)).coerceAtLeast(0.0)
+                sb.append("Reste " + "%.1f".format(remain) +
                     " km avant " + stages[stageIdx].name)
             }
         }
@@ -1543,7 +1595,10 @@ class MainActivity : Activity() {
         }
         if (tripActive && stageIdx < stages.size) {
             val s = stages[stageIdx]
-            val remain = (s.km - (tripKm - stageStartKm)).coerceAtLeast(0.0)
+            // v0.13 : reste recalculé par la route (comme un GPS) en priorité.
+            val remain =
+                if (s.hasPos && remainKm >= 0.0) remainKm
+                else (s.km - (tripKm - stageStartKm)).coerceAtLeast(0.0)
             sb.append('\n').append(s.name)
             sb.append('\n').append("reste ").append("%.1f".format(remain)).append(" km")
             if (sc >= 0) {
@@ -1665,7 +1720,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.12 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.13 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1686,7 +1741,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.12 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.13 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2074,4 +2129,205 @@ class MainActivity : Activity() {
             " (" + fmtKm(stageKm) + " km, distance routière).")
         refreshRoute()
     }
+
+    // ------------------------------------------- Carte des bornes (v0.13)
+
+    /**
+     * Badge / carte de recharge correspondant à une borne (null si aucun des
+     * réseaux de l'utilisateur). Le rapprochement se fait sur le nom de
+     * l'enseigne/enseigne de la base IRVE.
+     */
+    private fun badgeFor(b: Borne): String? {
+        val t = (b.enseigne + " " + b.nom).lowercase(Locale.ROOT)
+        return when {
+            t.contains("ionity") -> "Ionity (Electroverse)"
+            t.contains("electroverse") -> "Electroverse"
+            t.contains("electra") -> "Electra"
+            t.contains("chargemap") -> "Chargemap"
+            t.contains("mobilize") || t.contains("mobilise") -> "Mobilize"
+            t.contains("atlante") -> "Atlante"
+            t.contains("shell") -> "Shell Recharge"
+            t.contains("plugsurfing") -> "Plugsurfing"
+            else -> null
+        }
+    }
+
+    /** Échappe une chaîne pour l'insérer dans le JavaScript de la carte. */
+    private fun escapeJs(s: String): String =
+        s.replace("\\", "\\\\").replace("\"", "\\\"")
+            .replace("\n", " ").replace("\r", " ").replace("<", "‹")
+
+    /** Carte des bornes : choix zone → rayon → puissance, puis carte interactive. */
+    private fun showBornesMap() {
+        if (bornes.isEmpty()) {
+            alert("Bornes", "La base des bornes est vide : touchez d'abord « Mettre à jour bornes ».")
+            return
+        }
+        val nextStage = stages.getOrNull(if (tripActive) stageIdx else 0)
+        val here = lastLoc ?: bestLoc()
+        fun pickPower(center: Location, zoneLabel: String, radiusKm: Double) {
+            val filtres = arrayOf("Toutes (≥ 22 kW)", "≥ 50 kW", "≥ 100 kW", "≥ 150 kW")
+            AlertDialog.Builder(this)
+                .setTitle("Puissance minimale ?")
+                .setItems(filtres) { _, i ->
+                    val minKw = when (i) {
+                        1 -> 50.0
+                        2 -> 100.0
+                        3 -> 150.0
+                        else -> 22.0
+                    }
+                    openBornesMap(minKw, center, radiusKm, zoneLabel)
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+        fun pickRadius(center: Location, zoneLabel: String) {
+            AlertDialog.Builder(this)
+                .setTitle("Rayon de recherche (" + zoneLabel + ")")
+                .setItems(arrayOf("5 km", "10 km", "25 km", "50 km")) { _, i ->
+                    val r = when (i) {
+                        1 -> 10.0
+                        2 -> 25.0
+                        3 -> 50.0
+                        else -> 5.0
+                    }
+                    pickPower(center, zoneLabel, r)
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+        if (nextStage != null && nextStage.hasPos && here != null) {
+            AlertDialog.Builder(this)
+                .setTitle("Bornes autour de quoi ?")
+                .setItems(arrayOf("Autour de ma position",
+                    "Autour de « " + nextStage.name.take(30) + " »")) { _, i ->
+                    if (i == 0) {
+                        val c = here!!
+                        pickRadius(c, "autour de moi")
+                    } else {
+                        val c = Location("stage")
+                        c.latitude = nextStage.lat
+                        c.longitude = nextStage.lon
+                        pickRadius(c, "autour de « " + nextStage.name.take(30) + " »")
+                    }
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        } else if (here != null) {
+            pickRadius(here, "autour de moi")
+        } else {
+            alert("Position inconnue",
+                "Aucune position disponible pour l'instant (normal en garage).")
+        }
+    }
+
+    /** Ouvre la carte interactive des bornes (OpenStreetMap + Leaflet). */
+    private fun openBornesMap(minKw: Double, loc: Location, radiusKm: Double, zoneLabel: String) {
+        class NearB(val b: Borne, val km: Double, val badge: String?)
+        val arr: List<NearB> = synchronized(bornes) {
+            bornes.filter { it.kw >= minKw }
+                .map { b ->
+                    val d = FloatArray(1)
+                    Location.distanceBetween(loc.latitude, loc.longitude, b.lat, b.lon, d)
+                    NearB(b, d[0] / 1000.0, badgeFor(b))
+                }
+                .filter { it.km <= radiusKm }
+                .sortedBy { it.km }
+                .take(150)
+        }
+        if (arr.isEmpty()) {
+            log("Carte : aucune borne ≥ " + "%.0f".format(minKw) + " kW à moins de " +
+                "%.0f".format(radiusKm) + " km " + zoneLabel + ".")
+            alert("Bornes", "Aucune borne ≥ " + "%.0f".format(minKw) +
+                " kW à moins de " + "%.0f".format(radiusKm) + " km " + zoneLabel + ".")
+            return
+        }
+        val data = StringBuilder("[")
+        for (i in arr.indices) {
+            val n = arr[i]
+            if (i > 0) data.append(",")
+            data.append("{lat:").append(fmtD(n.b.lat))
+                .append(",lon:").append(fmtD(n.b.lon))
+                .append(",km:").append("%.1f".format(n.km))
+                .append(",kw:").append("%.0f".format(n.b.kw))
+                .append(",badge:\"").append(escapeJs(n.badge ?: "")).append("\"")
+                .append(",nom:\"").append(escapeJs(
+                    if (n.b.enseigne.isNotEmpty()) n.b.enseigne else n.b.nom)).append("\"")
+                .append(",adresse:\"").append(escapeJs(n.b.adresse)).append("\"}")
+        }
+        data.append("]")
+        val html = MAP_HTML
+            .replace("__DATA__", data.toString())
+            .replace("__LAT__", fmtD(loc.latitude))
+            .replace("__LON__", fmtD(loc.longitude))
+        var dlgRef: AlertDialog? = null
+        val wv = WebView(this)
+        wv.settings.javaScriptEnabled = true
+        wv.settings.domStorageEnabled = true
+        wv.addJavascriptInterface(object {
+            @JavascriptInterface
+            fun insertAt(i: Int) {
+                val n = arr.getOrNull(i) ?: return
+                handler.post {
+                    insertBorne(n.b, n.km)
+                    dlgRef?.dismiss()
+                }
+            }
+        }, "Android")
+        dlgRef = AlertDialog.Builder(this)
+            .setTitle("Bornes ≥ " + "%.0f".format(minKw) + " kW, " + arr.size + " affichées")
+            .setView(wv)
+            .setPositiveButton("Fermer", null)
+            .create()
+        wv.loadDataWithBaseURL("https://openstreetmap.org/", html, "text/html", "utf-8", null)
+        dlgRef?.show()
+        log("Carte des bornes ouverte : " + arr.size + " bornes ≥ " +
+            "%.0f".format(minKw) + " kW à moins de " + "%.0f".format(radiusKm) +
+            " km " + zoneLabel + ".")
+    }
+
+    /** Modèle HTML de la carte (OpenStreetMap + Leaflet, badge par couleur). */
+    private val MAP_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>html,body{margin:0;padding:0;height:100%;font-family:sans-serif}
+#map{height:100%}.lg{position:absolute;right:8px;bottom:8px;z-index:1000;background:#fff;
+padding:6px 8px;border:1px solid #888;border-radius:6px;font-size:11px;line-height:1.6}
+.dot{display:inline-block;width:10px;height:10px;border-radius:5px;margin-right:4px}</style>
+</head><body><div id="map"></div>
+<div class="lg" id="lg"></div>
+<script>
+var DATA = __DATA__;
+var COLORS = {
+ "Ionity (Electroverse)":"#e01a1a","Electroverse":"#e01a1a","Electra":"#0057b8",
+ "Chargemap":"#7b1fa2","Mobilize":"#00a19a","Atlante":"#f5a623",
+ "Shell Recharge":"#fbd206","Plugsurfing":"#2e7d32"};
+var map = L.map('map');
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+ {maxZoom:19, attribution:'&copy; OpenStreetMap'}).addTo(map);
+var pts = [];
+var leg = {};
+DATA.forEach(function(d, i) {
+  var col = d.badge ? (COLORS[d.badge] || '#777777') : '#777777';
+  if (d.badge) leg[d.badge] = col;
+  var m = L.circleMarker([d.lat, d.lon],
+    {radius:9, color:'#000', weight:1, fillColor:col, fillOpacity:0.95}).addTo(map);
+  m.bindPopup(
+    '<b>' + d.nom + '</b><br>' + d.kw + ' kW - à ' + d.km + ' km<br>' +
+    '<small>' + d.adresse + '</small>' +
+    (d.badge ? '<br><b>Carte : ' + d.badge + '</b>' : '') +
+    '<br><button style="margin-top:6px" onclick="Android.insertAt(' + i + ')">' +
+    'Insérer comme étape</button>');
+  pts.push([d.lat, d.lon]);
+});
+var lg = document.getElementById('lg');
+var h = '';
+for (var k in leg) { h += '<div><span class="dot" style="background:' +
+  leg[k] + '"></span>' + k + '</div>'; }
+lg.innerHTML = h;
+if (pts.length) { map.fitBounds(pts, {padding: [25, 25]}); }
+else { map.setView([__LAT__, __LON__], 11); }
+</script></body></html>"""
 }
