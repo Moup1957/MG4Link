@@ -286,7 +286,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.15.7 - non connecté"
+        statusTv.text = "MG4 Link v0.15.8 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -402,7 +402,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.15.7 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.15.8 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1655,9 +1655,13 @@ class MainActivity : Activity() {
         try {
             if (Build.VERSION.SDK_INT < 29) return
             val uri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            // v0.15.8 : Android renomme parfois les fichiers (« (6).txt ») quand
+            // le nom existe déjà - on supprime donc aussi les copies renommées.
+            val base = name.removeSuffix(".txt")
             contentResolver.delete(uri,
-                android.provider.MediaStore.MediaColumns.DISPLAY_NAME + " = ?",
-                arrayOf(name))
+                android.provider.MediaStore.MediaColumns.DISPLAY_NAME + " = ? OR " +
+                    android.provider.MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?",
+                arrayOf(name, base + " (%"))
             val values = android.content.ContentValues()
             values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
             values.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
@@ -1679,11 +1683,14 @@ class MainActivity : Activity() {
                 android.provider.MediaStore.MediaColumns._ID,
                 android.provider.MediaStore.MediaColumns.DISPLAY_NAME), null, null,
                 android.provider.MediaStore.MediaColumns.DATE_ADDED + " DESC")?.use { c ->
+                // v0.15.8 : Android renomme les copies « nom (N).txt » - on
+                // accepte aussi ces noms, la plus récente d'abord.
+                val base = name.removeSuffix(".txt")
                 while (c.moveToNext()) {
                     seen++
                     val dn = c.getString(1)
                     if (names.length < 150) names.append(dn).append(" | ")
-                    if (dn == name) {
+                    if (dn == name || (dn.startsWith(base + " (") && dn.endsWith(".txt"))) {
                         val u = android.content.ContentUris.withAppendedId(uri, c.getLong(0))
                         return contentResolver.openInputStream(u)
                             ?.bufferedReader()?.readText()
@@ -1830,7 +1837,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.7 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.8 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1851,7 +1858,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.7 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.8 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2495,7 +2502,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.15.7 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.15.8 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
