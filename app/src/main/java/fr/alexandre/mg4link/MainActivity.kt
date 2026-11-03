@@ -2476,11 +2476,19 @@ class MainActivity : Activity() {
         // suivi du chargement dans le journal pour distinguer un échec de
         // rendu d'un échec réseau.
         wv.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(url: String?, favicon: android.graphics.Bitmap?) {
+            override fun onPageStarted(
+                view: WebView?,
+                url: String?,
+                favicon: android.graphics.Bitmap?
+            ) {
                 log("Carte : page en cours de chargement (" + (url ?: "?") + ").")
             }
 
-            override fun onPageFinished(url: String?, favicon: android.graphics.Bitmap?) {
+            override fun onPageFinished(
+                view: WebView?,
+                url: String?,
+                favicon: android.graphics.Bitmap?
+            ) {
                 log("Carte : page chargée, rendu en cours.")
             }
 
