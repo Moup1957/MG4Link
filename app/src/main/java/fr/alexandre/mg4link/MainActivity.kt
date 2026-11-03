@@ -285,7 +285,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.15 - non connecté"
+        statusTv.text = "MG4 Link v0.15.1 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -401,7 +401,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.15 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.15.1 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1801,7 +1801,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.1 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1822,7 +1822,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.1 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2320,14 +2320,17 @@ class MainActivity : Activity() {
                 .setNegativeButton("Annuler", null)
                 .show()
         }
-        if (nextStage != null && nextStage.hasPos && here != null) {
+        if (nextStage != null && nextStage.hasPos) {
+            // v0.15.1 : l'étape est proposée même sans position GPS (utile
+            // à l'intérieur, sans fixation GPS).
+            val opts = ArrayList<String>()
+            if (here != null) opts.add("Autour de ma position")
+            opts.add("Autour de « " + nextStage.name.take(30) + " »")
             AlertDialog.Builder(this)
                 .setTitle("Bornes autour de quoi ?")
-                .setItems(arrayOf("Autour de ma position",
-                    "Autour de « " + nextStage.name.take(30) + " »")) { _, i ->
-                    if (i == 0) {
-                        val c = here!!
-                        pickRadius(c, "autour de moi")
+                .setItems(opts.toTypedArray()) { _, i ->
+                    if (i == 0 && here != null) {
+                        pickRadius(here, "autour de moi")
                     } else {
                         val c = Location("stage")
                         c.latitude = nextStage.lat
@@ -2340,8 +2343,40 @@ class MainActivity : Activity() {
         } else if (here != null) {
             pickRadius(here, "autour de moi")
         } else {
-            alert("Position inconnue",
-                "Aucune position disponible pour l'instant (normal en garage).")
+            // v0.15.1 : sans position et sans étape localisée, on propose de
+            // saisir un lieu (ville, adresse) recherché sur OpenStreetMap.
+            val et = EditText(this)
+            et.hint = "Ex : Gorges, Super U Gétigné…"
+            et.setSingleLine()
+            AlertDialog.Builder(this)
+                .setTitle("Autour de quel lieu ?")
+                .setMessage("Aucune position GPS disponible pour l'instant " +
+                    "(normal à l'intérieur). Saisissez un lieu :")
+                .setView(et)
+                .setPositiveButton("Rechercher") { _, _ ->
+                    val q = et.text.toString().trim()
+                    if (q.isEmpty()) return@setPositiveButton
+                    status("Recherche du lieu…")
+                    thread(name = "geocode-borne") {
+                        val g = geocode(q)
+                        handler.post {
+                            status("")
+                            if (g == null) {
+                                log("Lieu introuvable : « " + q + " ».")
+                                alert("Lieu introuvable",
+                                    "OpenStreetMap n'a pas trouvé « " + q + " ».")
+                            } else {
+                                log("« " + q + " » localisé pour la carte des bornes.")
+                                val c = Location("lieu")
+                                c.latitude = g.lat
+                                c.longitude = g.lon
+                                pickRadius(c, "autour de « " + q.take(30) + " »")
+                            }
+                        }
+                    }
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
         }
     }
 
