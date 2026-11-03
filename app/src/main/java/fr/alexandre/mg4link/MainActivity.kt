@@ -2486,8 +2486,7 @@ class MainActivity : Activity() {
 
             override fun onPageFinished(
                 view: WebView?,
-                url: String?,
-                favicon: android.graphics.Bitmap?
+                url: String?
             ) {
                 log("Carte : page chargée, rendu en cours.")
             }
