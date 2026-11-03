@@ -34,6 +34,9 @@ import android.text.InputType
 import android.view.Gravity
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebChromeClient
+import android.webkit.ConsoleMessage
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -282,7 +285,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.14 - non connecté"
+        statusTv.text = "MG4 Link v0.15 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -398,7 +401,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.14 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.15 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1108,8 +1111,12 @@ class MainActivity : Activity() {
             }
             // Distances routières réelles (v0.9), depuis la position actuelle
             // pour la première étape, sinon depuis l'étape géocodée précédente.
+            // v0.15 : la position n'est utilisée que si elle est récente (moins de
+            // 10 min) - une ancienne position pouvait donner une distance de 0 km.
             val here = lastLoc ?: bestLoc()
-            val start = if (here != null) Geo(here.latitude, here.longitude) else null
+            val fresh = here != null && here.time > 0L &&
+                System.currentTimeMillis() - here.time < 10L * 60 * 1000
+            val start = if (fresh) Geo(here!!.latitude, here!!.longitude) else null
             val result = ArrayList<Stage>()
             var prev: Geo? = null
             for (p in pend) {
@@ -1378,6 +1385,24 @@ class MainActivity : Activity() {
         stageStartKm = tripKm
         stageStartSoc = socPct
         lowWarned = false
+        // v0.15 : recalcul de la distance de la première étape au départ du
+        // trajet, si la position n'était pas encore connue (km à 0) au moment
+        // de la construction de l'itinéraire.
+        val st0 = stages[stageIdx]
+        if (st0.hasPos) {
+            val here = lastLoc ?: bestLoc()
+            val fresh = here != null && here.time > 0L &&
+                System.currentTimeMillis() - here.time < 10L * 60 * 1000
+            if (fresh) {
+                val d = roadKm(Geo(here!!.latitude, here!!.longitude), Geo(st0.lat, st0.lon))
+                if (d > 0.1 && (st0.km <= 0.1 || d < st0.km - 1.0 || d > st0.km + 1.0)) {
+                    stages[stageIdx] = Stage(st0.name, d, st0.lat, st0.lon)
+                    log("Distance recalculée : « " + st0.name + " » à " + fmtKm(d) + " km.")
+                }
+            } else if (st0.km <= 0.1) {
+                log("Position GPS pas encore fixée : distance recalculée en roulant.")
+            }
+        }
         log("Trajet démarré : prochaine étape « " + stages[0].name + " » à " +
             "%.0f".format(stages[0].km) + " km.")
         refreshRoute()
@@ -1776,7 +1801,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.14 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1797,7 +1822,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.14 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -1905,8 +1930,15 @@ class MainActivity : Activity() {
                     .putLong("bornesDate", System.currentTimeMillis())
                     .apply()
                 log("Base IRVE France chargée : " + bornes.size + " bornes ≥ 22 kW (" + n + " lignes).")
-                // Espagne + Portugal (v0.8) via OpenStreetMap
-                updateBornesIberia()
+                // Espagne + Portugal : retéléchargés seulement si le cache a plus de
+                // 7 jours (v0.15) - le serveur Overpass bloque les requêtes répétées.
+                val iAge = System.currentTimeMillis() - getSharedPreferences(
+                    "mg4link", Context.MODE_PRIVATE).getLong("iberiaDate", 0L)
+                if (iAge in 1 until 7L * 24 * 3600 * 1000) {
+                    log("Bornes Espagne/Portugal : cache de moins de 7 jours, pas de retéléchargement.")
+                } else {
+                    updateBornesIberia()
+                }
                 log("Base complète chargée : " + bornes.size + " bornes (France + Espagne + Portugal).")
                 if (bornes.isEmpty()) {
                     alert("Bornes", "La base a été téléchargée mais aucune borne ≥ 22 kW n'a été trouvée. " +
@@ -1974,9 +2006,16 @@ class MainActivity : Activity() {
                 .apply()
         }
         if (total == 0) {
-            alert("Bornes Espagne/Portugal",
-                "Aucune borne n'a été trouvée dans OpenStreetMap pour ces pays.\n" +
-                    "Copie le journal et envoie-le pour diagnostic.")
+            // v0.15 : en cas d'échec Overpass, on recharge le cache précédent
+            // au lieu de perdre les bornes Espagne/Portugal de la session.
+            if (bornesIberiaFile().exists()) {
+                loadBornesIberia()
+                log("Échec Espagne/Portugal : cache précédent rechargé.")
+            } else {
+                alert("Bornes Espagne/Portugal",
+                    "Aucune borne n'a été trouvée dans OpenStreetMap pour ces pays.\n" +
+                        "Copie le journal et envoie-le pour diagnostic.")
+            }
         }
         return total
     }
@@ -2239,7 +2278,7 @@ class MainActivity : Activity() {
 
     /** Échappe une chaîne pour l'insérer dans le JavaScript de la carte. */
     private fun escapeJs(s: String): String =
-        s.replace("\\", "\\\\").replace("\"", "\\\"")
+        s.replace("\\", "\\\\").replace("\"", "\\\"").replace("'", "\\'")
             .replace("\n", " ").replace("\r", " ").replace("<", "‹")
 
     /** Carte des bornes : choix zone → rayon → puissance, puis carte interactive. */
@@ -2368,6 +2407,15 @@ class MainActivity : Activity() {
         // la boîte de dialogue et n'affichait rien.
         wv.layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(440))
+        // v0.15 : erreurs et messages JavaScript de la carte remontés dans le journal.
+        wv.webViewClient = WebViewClient()
+        wv.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(cm: ConsoleMessage): Boolean {
+                log("Carte JS : " + cm.message() + " (" + cm.sourceId() + ":" +
+                    cm.lineNumber() + ")")
+                return true
+            }
+        }
         wv.addJavascriptInterface(object {
             @JavascriptInterface
             fun insertAt(i: Int) {
@@ -2376,6 +2424,11 @@ class MainActivity : Activity() {
                     insertBorne(n.b, n.km)
                     dlgRef?.dismiss()
                 }
+            }
+
+            @JavascriptInterface
+            fun jsErr(msg: String) {
+                log("Erreur carte JS : " + msg)
             }
         }, "Android")
         dlgRef = AlertDialog.Builder(this)
@@ -2399,15 +2452,20 @@ class MainActivity : Activity() {
     private val MAP_HTML = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>html,body{margin:0;padding:0;height:100%;font-family:sans-serif}
 #map{height:100%}.lg{position:absolute;right:8px;bottom:8px;z-index:1000;background:#fff;
 padding:6px 8px;border:1px solid #888;border-radius:6px;font-size:11px;line-height:1.6}
-.dot{display:inline-block;width:10px;height:10px;border-radius:5px;margin-right:4px}</style>
+.dot{display:inline-block;width:10px;height:10px;border-radius:5px;margin-right:4px}
+#err{position:absolute;left:8px;top:8px;z-index:1000;background:#fff;
+padding:6px 8px;border:1px solid #888;border-radius:6px;font-size:12px}</style>
 </head><body><div id="map"></div>
+<div id="err">Chargement de la carte…</div>
 <div class="lg" id="lg"></div>
 <script>
+// v0.15 : toute erreur JavaScript est remontée dans le journal de l'app.
+window.onerror = function(m) { Android.jsErr('' + m); return true; };
 var DATA = __DATA__;
 var COLORS = {
  "Ionity (Electroverse)":"#e01a1a","Electroverse":"#e01a1a","Electra":"#0057b8",
@@ -2450,5 +2508,6 @@ for (var k in leg) { h += '<div><span class="dot" style="background:' +
 lg.innerHTML = h;
 if (pts.length) { map.fitBounds(pts, {padding: [25, 25]}); }
 else { map.setView([__LAT__, __LON__], 11); }
+document.getElementById('err').style.display = 'none';
 </script></body></html>"""
 }
