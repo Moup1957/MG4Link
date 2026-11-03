@@ -286,7 +286,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.15.4 - non connecté"
+        statusTv.text = "MG4 Link v0.15.5 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -402,7 +402,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.15.4 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.15.5 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1809,7 +1809,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.4 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.5 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1830,7 +1830,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.4 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.5 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2471,6 +2471,10 @@ class MainActivity : Activity() {
         val wv = WebView(this)
         wv.settings.javaScriptEnabled = true
         wv.settings.domStorageEnabled = true
+        // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
+        // - sans User-Agent identifiable, il répond « 418 Blocked ».
+        wv.settings.userAgentString =
+            "MG4Link/0.15.5 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
@@ -2582,8 +2586,19 @@ var COLORS = {
  "Chargemap":"#7b1fa2","Mobilize":"#00a19a","Atlante":"#f5a623",
  "Shell Recharge":"#fbd206","Plugsurfing":"#2e7d32"};
 var map = L.map('map');
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
- {maxZoom:19, attribution:'&copy; OpenStreetMap'}).addTo(map);
+// v0.15.5 : si le serveur de tuiles OSM bloque (418), on bascule
+// automatiquement sur un serveur de secours (CARTO, fond identique).
+var base = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+ {maxZoom:19, attribution:'&copy; OpenStreetMap'});
+var swapped = false;
+base.on('tileerror', function() {
+  if (!swapped) {
+    swapped = true;
+    Android.jsErr('Tuiles OSM bloquées : bascule vers serveur de secours.');
+    base.setUrl('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', false);
+  }
+});
+base.addTo(map);
 var pts = [];
 var leg = {};
 DATA.forEach(function(d, i) {
