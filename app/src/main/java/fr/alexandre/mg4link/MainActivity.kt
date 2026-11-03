@@ -40,6 +40,7 @@ import android.webkit.ConsoleMessage
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.Window
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
@@ -285,7 +286,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.15.2 - non connecté"
+        statusTv.text = "MG4 Link v0.15.4 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -401,7 +402,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.15.2 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.15.4 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1684,7 +1685,11 @@ class MainActivity : Activity() {
                     }
                 }
             }
-        } catch (e: Exception) { }
+        } catch (e: Exception) {
+            // v0.15.3 : plus de silence - chaque échec de lecture du cache
+            // public est journalisé pour diagnostic.
+            log("Lecture du cache public " + name + " impossible : " + e.message)
+        }
         return null
     }
 
@@ -1738,7 +1743,10 @@ class MainActivity : Activity() {
             val public = loadPublicCache("bornes_iberia.txt")
             if (public != null) try { f.writeText(public) } catch (e: Exception) { }
         }
-        if (!f.exists()) return
+        if (!f.exists()) {
+            log("Cache Espagne/Portugal introuvable (interne et dossier Download).")
+            return
+        }
         try {
             val lst = ArrayList<Borne>()
             f.forEachLine { line -> parseBorneCache(line)?.let { lst.add(it) } }
@@ -1801,7 +1809,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.2 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.4 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1822,7 +1830,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.2 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.4 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -1973,24 +1981,45 @@ class MainActivity : Activity() {
                 val q = "[out:csv(::lat,::lon,\"maxpower\",\"socket:type2_combo:output\"," +
                     "\"operator\",\"name\",\"addr:street\",\"addr:housenumber\",\"addr:city\";true;\",\")]" +
                     "[timeout:180];node[\"amenity\"=\"charging_station\"](" + bbox + ");out;"
-                val url = "https://overpass-api.de/api/interpreter?data=" + URLEncoder.encode(q, "UTF-8")
+                val enc = URLEncoder.encode(q, "UTF-8")
                 log("Téléchargement des bornes " + pays + " (OpenStreetMap)...")
                 var header: List<String>? = null
                 var count = 0
                 val parsed = ArrayList<Borne>()
-                downloadCsv(url) { line ->
-                    if (header == null) {
-                        header = splitCsvLine(line, ',')
-                        log("Overpass " + pays + " - en-tête reçu : " + line.take(200))
-                    } else {
-                        val b = overpassToBorne(splitCsvLine(line, ','), header!!, pays)
-                        if (b != null) {
-                            parsed.add(b)
-                            count++
-                            out.append(cacheLine(b))
+                // v0.15.3 : plusieurs serveurs Overpass en repli - le serveur
+                // principal refuse parfois les requêtes répétées (429).
+                var lastErr: Exception? = null
+                val bases = listOf(
+                    "https://overpass-api.de/api/interpreter?data=",
+                    "https://overpass.kumi.systems/api/interpreter?data=",
+                    "https://overpass.private.coffee/api/interpreter?data=")
+                for ((bi, base) in bases.withIndex()) {
+                    try {
+                        header = null
+                        parsed.clear()
+                        count = 0
+                        downloadCsv(base + enc) { line ->
+                            if (header == null) {
+                                header = splitCsvLine(line, ',')
+                                log("Overpass " + pays + " - en-tête reçu : " + line.take(200))
+                            } else {
+                                val b = overpassToBorne(splitCsvLine(line, ','), header!!, pays)
+                                if (b != null) {
+                                    parsed.add(b)
+                                    count++
+                                    out.append(cacheLine(b))
+                                }
+                            }
                         }
+                        lastErr = null
+                        break
+                    } catch (e: Exception) {
+                        lastErr = e
+                        log("Overpass " + pays + " : serveur " + (bi + 1) + "/" +
+                            bases.size + " en échec (" + e.message + ")...")
                     }
                 }
+                if (lastErr != null) throw lastErr
                 synchronized(bornes) { bornes.addAll(parsed) }
                 log("Bornes " + pays + " : " + count + " bornes ≥ 22 kW ajoutées.")
                 total += count
@@ -2438,16 +2467,34 @@ class MainActivity : Activity() {
             .replace("__ME__", meJs)
             .replace("__LAT__", fmtD(loc.latitude))
             .replace("__LON__", fmtD(loc.longitude))
-        var dlgRef: AlertDialog? = null
+        var dlgRef: android.app.Dialog? = null
         val wv = WebView(this)
         wv.settings.javaScriptEnabled = true
         wv.settings.domStorageEnabled = true
-        // v0.14 : hauteur explicite - sans elle, la carte mesurait 0 pixel dans
-        // la boîte de dialogue et n'affichait rien.
-        wv.layoutParams = ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(440))
-        // v0.15 : erreurs et messages JavaScript de la carte remontés dans le journal.
-        wv.webViewClient = WebViewClient()
+        // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
+        // vide, même le texte « Chargement de la carte… » était absent) ->
+        // suivi du chargement dans le journal pour distinguer un échec de
+        // rendu d'un échec réseau.
+        wv.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(url: String?, favicon: android.graphics.Bitmap?) {
+                log("Carte : page en cours de chargement (" + (url ?: "?") + ").")
+            }
+
+            override fun onPageFinished(url: String?, favicon: android.graphics.Bitmap?) {
+                log("Carte : page chargée, rendu en cours.")
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: android.webkit.WebResourceRequest?,
+                error: android.webkit.WebResourceError?
+            ) {
+                try {
+                    log("Carte : ressource en échec : " + error?.description +
+                        " (" + request?.url + ")")
+                } catch (e: Exception) { }
+            }
+        }
         wv.webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(cm: ConsoleMessage): Boolean {
                 log("Carte JS : " + cm.message() + " (" + cm.sourceId() + ":" +
@@ -2470,18 +2517,35 @@ class MainActivity : Activity() {
                 log("Erreur carte JS : " + msg)
             }
         }, "Android")
-        dlgRef = AlertDialog.Builder(this)
-            .setTitle("Bornes ≥ " + "%.0f".format(minKw) + " kW, " + arr.size + " affichées")
-            .setView(wv)
-            .setPositiveButton("Fermer", null)
-            .create()
-        wv.loadDataWithBaseURL("https://openstreetmap.org/", html, "text/html", "utf-8", null)
-        dlgRef?.show()
+        // v0.15.4 : vrai Dialog (plein écran) construit manuellement - la
+        // boîte AlertDialog laissait la WebView invisible/à 0 pixel malgré
+        // ses paramètres de taille (écran gris vide constaté en test).
+        val dlg = android.app.Dialog(this)
+        dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        val title = TextView(this)
+        title.text = "Bornes ≥ " + "%.0f".format(minKw) + " kW, " + arr.size + " affichées"
+        title.textSize = 17f
+        title.typeface = Typeface.DEFAULT_BOLD
+        title.setPadding(dp(14), dp(12), dp(14), dp(6))
+        box.addView(title)
+        box.addView(wv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(440)))
+        val close = Button(this)
+        close.text = "Fermer"
+        close.setOnClickListener { dlg.dismiss() }
+        box.addView(close)
+        dlgRef = dlg
+        dlg.setContentView(box)
+        dlg.show()
         try {
-            dlgRef?.window?.setLayout(
+            dlg.window?.setLayout(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.WRAP_CONTENT)
         } catch (e: Exception) { }
+        log("Carte : envoi de la page (" + html.length + " caractères)...")
+        wv.loadDataWithBaseURL("https://openstreetmap.org/", html, "text/html", "utf-8", null)
         log("Carte des bornes ouverte : " + arr.size + " bornes ≥ " +
             "%.0f".format(minKw) + " kW à moins de " + "%.0f".format(radiusKm) +
             " km " + zoneLabel + ".")
