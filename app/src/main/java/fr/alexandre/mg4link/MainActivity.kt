@@ -285,7 +285,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.15.1 - non connecté"
+        statusTv.text = "MG4 Link v0.15.2 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -401,7 +401,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.15.1 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.15.2 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1801,7 +1801,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.1 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.2 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1822,7 +1822,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.1 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.2 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2006,10 +2006,11 @@ class MainActivity : Activity() {
                 .apply()
         }
         if (total == 0) {
-            // v0.15 : en cas d'échec Overpass, on recharge le cache précédent
-            // au lieu de perdre les bornes Espagne/Portugal de la session.
+            // v0.15.2 : on tente TOUJOURS le rechargement du cache (interne ou
+            // dossier Download public) - après une réinstallation, le fichier
+            // interne n'existe plus mais le cache public, lui, a survécu.
+            loadBornesIberia()
             if (bornesIberiaFile().exists()) {
-                loadBornesIberia()
                 log("Échec Espagne/Portugal : cache précédent rechargé.")
             } else {
                 alert("Bornes Espagne/Portugal",
@@ -2407,8 +2408,11 @@ class MainActivity : Activity() {
             if (i > 0) data.append(",")
             data.append("{lat:").append(fmtD(n.b.lat))
                 .append(",lon:").append(fmtD(n.b.lon))
-                .append(",km:").append("%.1f".format(n.km))
-                .append(",kw:").append("%.0f".format(n.b.kw))
+                // v0.15.2 : Locale.US obligatoire - en français, "%.1f" donne
+                // "4,5" (virgule) et cassait le JavaScript de la carte
+                // (Uncaught SyntaxError: Unexpected number).
+                .append(",km:").append(String.format(Locale.US, "%.1f", n.km))
+                .append(",kw:").append(String.format(Locale.US, "%.0f", n.b.kw))
                 .append(",badge:\"").append(escapeJs(n.badge ?: "")).append("\"")
                 .append(",nom:\"").append(escapeJs(
                     if (n.b.enseigne.isNotEmpty()) n.b.enseigne else n.b.nom)).append("\"")
