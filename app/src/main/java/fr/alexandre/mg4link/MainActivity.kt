@@ -286,7 +286,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.15.5 - non connecté"
+        statusTv.text = "MG4 Link v0.15.7 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -402,7 +402,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.15.5 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.15.7 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1670,6 +1670,8 @@ class MainActivity : Activity() {
     }
 
     private fun loadPublicCache(name: String): String? {
+        var seen = 0
+        val names = StringBuilder()
         try {
             if (Build.VERSION.SDK_INT < 29) return null
             val uri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
@@ -1678,7 +1680,10 @@ class MainActivity : Activity() {
                 android.provider.MediaStore.MediaColumns.DISPLAY_NAME), null, null,
                 android.provider.MediaStore.MediaColumns.DATE_ADDED + " DESC")?.use { c ->
                 while (c.moveToNext()) {
-                    if (c.getString(1) == name) {
+                    seen++
+                    val dn = c.getString(1)
+                    if (names.length < 150) names.append(dn).append(" | ")
+                    if (dn == name) {
                         val u = android.content.ContentUris.withAppendedId(uri, c.getLong(0))
                         return contentResolver.openInputStream(u)
                             ?.bufferedReader()?.readText()
@@ -1690,6 +1695,22 @@ class MainActivity : Activity() {
             // public est journalisé pour diagnostic.
             log("Lecture du cache public " + name + " impossible : " + e.message)
         }
+        // v0.15.6 : après une réinstallation, Android peut cacher à l'app les
+        // fichiers qu'elle avait créés dans Download. On tente une lecture
+        // directe du dossier Download/MG4Link en plus de la mediathèque.
+        try {
+            val dir = File(
+                android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_DOWNLOADS), "MG4Link")
+            val f = File(dir, name)
+            if (f.exists() && f.canRead()) {
+                log("Cache public « " + name + " » lu directement dans Download/MG4Link.")
+                return f.readText()
+            }
+        } catch (e: Exception) { }
+        // v0.15.6 : diagnostic - ce que l'app voit réellement dans Download.
+        log("Cache public : « " + name + " » invisible (" + seen +
+            " fichiers visibles dans Download). Aperçu : " + names)
         return null
     }
 
@@ -1809,7 +1830,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.5 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.7 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1830,7 +1851,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.5 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.15.7 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2474,7 +2495,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.15.5 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.15.7 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
@@ -2586,18 +2607,11 @@ var COLORS = {
  "Chargemap":"#7b1fa2","Mobilize":"#00a19a","Atlante":"#f5a623",
  "Shell Recharge":"#fbd206","Plugsurfing":"#2e7d32"};
 var map = L.map('map');
-// v0.15.5 : si le serveur de tuiles OSM bloque (418), on bascule
-// automatiquement sur un serveur de secours (CARTO, fond identique).
-var base = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
- {maxZoom:19, attribution:'&copy; OpenStreetMap'});
-var swapped = false;
-base.on('tileerror', function() {
-  if (!swapped) {
-    swapped = true;
-    Android.jsErr('Tuiles OSM bloquées : bascule vers serveur de secours.');
-    base.setUrl('https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', false);
-  }
-});
+// v0.15.7 : tuiles CARTO (fond OpenStreetMap) - le serveur de tuiles
+// d'OpenStreetMap renvoie une image « Blocked » (418) sans déclencher
+// d'erreur exploitable ; CARTO accepte le trafic des applications.
+var base = L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
+ {subdomains:'abcd', maxZoom:19, attribution:'&copy; OpenStreetMap &copy; CARTO'});
 base.addTo(map);
 var pts = [];
 var leg = {};
