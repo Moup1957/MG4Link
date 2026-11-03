@@ -282,7 +282,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.13 - non connecté"
+        statusTv.text = "MG4 Link v0.14 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -352,6 +352,12 @@ class MainActivity : Activity() {
             )
         )
 
+        root.addView(
+            row(
+                makeButton("Supprimer étape…") { removeStage() }
+            )
+        )
+
         routeTv = TextView(this)
         routeTv.typeface = Typeface.MONOSPACE
         routeTv.textSize = 12f
@@ -392,7 +398,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.13 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.14 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1617,13 +1623,59 @@ class MainActivity : Activity() {
 
     private fun bornesFile(): File = File(filesDir, "bornes_cache.txt")
 
+    // v0.14 : copie publique des caches dans Téléchargements/MG4Link - ce dossier
+    // n'est PAS supprimé à la désinstallation (Android 9 et plus récent).
+    private fun savePublicCache(name: String, text: String) {
+        try {
+            if (Build.VERSION.SDK_INT < 29) return
+            val uri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            contentResolver.delete(uri,
+                android.provider.MediaStore.MediaColumns.DISPLAY_NAME + " = ?",
+                arrayOf(name))
+            val values = android.content.ContentValues()
+            values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+            values.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+            values.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Download/MG4Link")
+            val u = contentResolver.insert(uri, values) ?: return
+            contentResolver.openOutputStream(u)?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+        } catch (e: Exception) {
+            log("Sauvegarde publique impossible : " + e.message)
+        }
+    }
+
+    private fun loadPublicCache(name: String): String? {
+        try {
+            if (Build.VERSION.SDK_INT < 29) return null
+            val uri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            contentResolver.query(uri, arrayOf(
+                android.provider.MediaStore.MediaColumns._ID,
+                android.provider.MediaStore.MediaColumns.DISPLAY_NAME), null, null,
+                android.provider.MediaStore.MediaColumns.DATE_ADDED + " DESC")?.use { c ->
+                while (c.moveToNext()) {
+                    if (c.getString(1) == name) {
+                        val u = android.content.ContentUris.withAppendedId(uri, c.getLong(0))
+                        return contentResolver.openInputStream(u)
+                            ?.bufferedReader()?.readText()
+                    }
+                }
+            }
+        } catch (e: Exception) { }
+        return null
+    }
+
     private fun bornesAgeMs(): Long {
         val d = getSharedPreferences("mg4link", Context.MODE_PRIVATE).getLong("bornesDate", 0L)
         return if (d == 0L) Long.MAX_VALUE else System.currentTimeMillis() - d
     }
 
     private fun loadBornesCache() {
-        val f = bornesFile()
+        var f = bornesFile()
+        if (!f.exists()) {
+            // v0.14 : repli sur la copie publique (Téléchargements/MG4Link) qui
+            // survit à la désinstallation de l'app.
+            val public = loadPublicCache("bornes_cache.txt")
+            if (public != null) try { f.writeText(public) } catch (e: Exception) { }
+        }
         if (!f.exists()) return
         try {
             val lst = ArrayList<Borne>()
@@ -1656,7 +1708,11 @@ class MainActivity : Activity() {
     private fun bornesIberiaFile(): File = File(filesDir, "bornes_iberia.txt")
 
     private fun loadBornesIberia() {
-        val f = bornesIberiaFile()
+        var f = bornesIberiaFile()
+        if (!f.exists()) {
+            val public = loadPublicCache("bornes_iberia.txt")
+            if (public != null) try { f.writeText(public) } catch (e: Exception) { }
+        }
         if (!f.exists()) return
         try {
             val lst = ArrayList<Borne>()
@@ -1720,7 +1776,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.13 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.14 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1741,7 +1797,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.13 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.14 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -1844,6 +1900,7 @@ class MainActivity : Activity() {
                     bornes.addAll(parsed)
                 }
                 bornesFile().writeText(out.toString())
+                savePublicCache("bornes_cache.txt", out.toString())
                 getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
                     .putLong("bornesDate", System.currentTimeMillis())
                     .apply()
@@ -1911,6 +1968,7 @@ class MainActivity : Activity() {
         }
         if (out.isNotEmpty()) {
             bornesIberiaFile().writeText(out.toString())
+            savePublicCache("bornes_iberia.txt", out.toString())
             getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
                 .putLong("iberiaDate", System.currentTimeMillis())
                 .apply()
@@ -2132,6 +2190,33 @@ class MainActivity : Activity() {
 
     // ------------------------------------------- Carte des bornes (v0.13)
 
+    /** Supprime une étape de l'itinéraire (v0.14), ex. une borne insérée. */
+    private fun removeStage() {
+        if (stages.isEmpty()) {
+            alert("Itinéraire", "Aucune étape à supprimer.")
+            return
+        }
+        val labels = stages.mapIndexed { i, s ->
+            (i + 1).toString() + ". " + s.name.take(45)
+        }.toTypedArray()
+        var sel = -1
+        AlertDialog.Builder(this)
+            .setTitle("Supprimer quelle étape ?")
+            .setSingleChoiceItems(labels, -1) { _, w -> sel = w }
+            .setPositiveButton("Supprimer") { _, _ ->
+                if (sel >= 0 && sel < stages.size) {
+                    val s = stages.removeAt(sel)
+                    if (stageIdx > sel) stageIdx--
+                    if (stageIdx >= stages.size) tripActive = false
+                    log("Étape supprimée : " + s.name)
+                    refreshRoute()
+                    refreshOverlay()
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
     /**
      * Badge / carte de recharge correspondant à une borne (null si aucun des
      * réseaux de l'utilisateur). Le rapprochement se fait sur le nom de
@@ -2256,14 +2341,33 @@ class MainActivity : Activity() {
                 .append(",adresse:\"").append(escapeJs(n.b.adresse)).append("\"}")
         }
         data.append("]")
+        // v0.14 : l'itinéraire et la position actuelle sont dessinés sur la carte.
+        val route = StringBuilder("[")
+        var firstPt = true
+        for (s in stages) {
+            if (s.hasPos) {
+                if (!firstPt) route.append(",")
+                firstPt = false
+                route.append("[").append(fmtD(s.lat)).append(",").append(fmtD(s.lon)).append("]")
+            }
+        }
+        route.append("]")
+        val me = lastLoc
+        val meJs = if (me != null) "[" + fmtD(me.latitude) + "," + fmtD(me.longitude) + "]" else "null"
         val html = MAP_HTML
             .replace("__DATA__", data.toString())
+            .replace("__ROUTE__", route.toString())
+            .replace("__ME__", meJs)
             .replace("__LAT__", fmtD(loc.latitude))
             .replace("__LON__", fmtD(loc.longitude))
         var dlgRef: AlertDialog? = null
         val wv = WebView(this)
         wv.settings.javaScriptEnabled = true
         wv.settings.domStorageEnabled = true
+        // v0.14 : hauteur explicite - sans elle, la carte mesurait 0 pixel dans
+        // la boîte de dialogue et n'affichait rien.
+        wv.layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(440))
         wv.addJavascriptInterface(object {
             @JavascriptInterface
             fun insertAt(i: Int) {
@@ -2281,6 +2385,11 @@ class MainActivity : Activity() {
             .create()
         wv.loadDataWithBaseURL("https://openstreetmap.org/", html, "text/html", "utf-8", null)
         dlgRef?.show()
+        try {
+            dlgRef?.window?.setLayout(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT)
+        } catch (e: Exception) { }
         log("Carte des bornes ouverte : " + arr.size + " bornes ≥ " +
             "%.0f".format(minKw) + " kW à moins de " + "%.0f".format(radiusKm) +
             " km " + zoneLabel + ".")
@@ -2322,6 +2431,18 @@ DATA.forEach(function(d, i) {
     'Insérer comme étape</button>');
   pts.push([d.lat, d.lon]);
 });
+// v0.14 : itinéraire (trait bleu) + position actuelle (point bleu)
+var ROUTE = __ROUTE__;
+if (ROUTE.length > 1) {
+  L.polyline(ROUTE, {color: '#0b57d0', weight: 4, opacity: 0.75}).addTo(map);
+  ROUTE.forEach(function(p) { pts.push(p); });
+}
+var ME = __ME__;
+if (ME) {
+  L.circleMarker(ME, {radius: 11, color: '#fff', weight: 3,
+    fillColor: '#1a73e8', fillOpacity: 1}).addTo(map).bindPopup('Vous êtes ici');
+  pts.push(ME);
+}
 var lg = document.getElementById('lg');
 var h = '';
 for (var k in leg) { h += '<div><span class="dot" style="background:' +
