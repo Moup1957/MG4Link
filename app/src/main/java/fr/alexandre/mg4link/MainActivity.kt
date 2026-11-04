@@ -267,6 +267,9 @@ class MainActivity : Activity() {
         b.minHeight = 0
         b.minWidth = 0
         b.setPadding(dp(8), dp(3), dp(8), dp(3))
+        // v0.20 : thème sombre - boutons gris foncé, texte blanc.
+        b.setTextColor(Color.WHITE)
+        b.setBackgroundColor(0xFF37474F.toInt())
         b.setOnClickListener { onClick() }
         return b
     }
@@ -286,15 +289,16 @@ class MainActivity : Activity() {
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
-        // v0.19 : couleurs de la maquette utilisateur - fond violet clair,
-        // onglets bleus (Connexion, Code) et roses (Itinéraire, Bornes).
-        root.setBackgroundColor(Color.parseColor("#D8B4FE"))
+        // v0.20 : retour au thème sombre - fond noir, textes blancs,
+        // boutons gris foncé, onglet actif vert.
+        root.setBackgroundColor(Color.BLACK)
         root.setPadding(dp(8), dp(28), dp(8), dp(8))
 
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.19 - non connecté"
+        statusTv.setTextColor(Color.WHITE)
+        statusTv.text = "MG4 Link v0.20 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -312,17 +316,17 @@ class MainActivity : Activity() {
         val contents = listOf(secConn, secRoute, secBornes, secCode)
 
         val tabBtns = ArrayList<Button>()
-        // v0.19 : une couleur par onglet, comme sur la maquette.
-        val tabColors = intArrayOf(0xFF90CAF9.toInt(), 0xFFFFCDD2.toInt(),
-            0xFFFFCDD2.toInt(), 0xFF90CAF9.toInt())
-        for ((i, t) in tabTitles.withIndex()) {
+        // v0.20 : thème sombre - gris foncé, texte blanc ; l'onglet actif
+        // passe au vert dans showTab().
+        for (t in tabTitles) {
             val b = Button(this)
             b.text = t
             b.isAllCaps = false
             b.textSize = 13f
             b.minHeight = 0
             b.setPadding(dp(4), dp(6), dp(4), dp(6))
-            b.setBackgroundColor(tabColors[i])
+            b.setTextColor(Color.WHITE)
+            b.setBackgroundColor(0xFF424242.toInt())
             tabBtns.add(b)
         }
         val tabRow = LinearLayout(this)
@@ -332,8 +336,10 @@ class MainActivity : Activity() {
         }
         root.addView(tabRow)
         for (i in contents.indices) {
-            if (i == 3) {
-                // Onglet Code : pas de ScrollView englobant, le journal a le sien.
+            if (i == 0 || i == 3) {
+                // v0.20 : Connexion et Code ne défilent pas - leur zone
+                // d'affichage (données voiture, journal) occupe toute la
+                // hauteur restante (weight 1).
                 root.addView(contents[i], LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             } else {
@@ -346,6 +352,10 @@ class MainActivity : Activity() {
         fun showTab(i: Int) {
             for (j in contents.indices) {
                 contents[j].visibility = if (j == i) View.VISIBLE else View.GONE
+                // v0.20 : onglet actif vert, les autres gris foncé.
+                tabBtns[j].setBackgroundColor(
+                    if (j == i) 0xFF2E7D32.toInt() else 0xFF424242.toInt())
+                tabBtns[j].setTextColor(Color.WHITE)
                 tabBtns[j].setTypeface(null, if (j == i) Typeface.BOLD else Typeface.NORMAL)
             }
             // v0.18 : à l'ouverture de l'onglet Code, le journal défile en bas.
@@ -367,6 +377,9 @@ class MainActivity : Activity() {
 
         liveSwitch = Switch(this)
         liveSwitch.text = "Lecture live"
+        // v0.20 : texte blanc et taille compacte.
+        liveSwitch.textSize = 12f
+        liveSwitch.setTextColor(Color.WHITE)
         liveSwitch.setOnCheckedChangeListener { _, on -> setLive(on) }
         secConn.addView(
             row(
@@ -381,8 +394,12 @@ class MainActivity : Activity() {
         liveTv = TextView(this)
         liveTv.typeface = Typeface.MONOSPACE
         liveTv.textSize = 12f
+        liveTv.setTextColor(Color.WHITE)
         liveTv.setPadding(0, dp(3), 0, dp(3))
-        secConn.addView(liveTv)
+        // v0.20 : zone de données pleine hauteur - les 8 lignes de
+        // la voiture s'affichent sans faire défiler.
+        secConn.addView(liveTv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         refreshLive()
 
         // ----- Onglet ITINÉRAIRE -----
@@ -419,6 +436,7 @@ class MainActivity : Activity() {
         routeTv = TextView(this)
         routeTv.typeface = Typeface.MONOSPACE
         routeTv.textSize = 12f
+        routeTv.setTextColor(Color.WHITE)
         routeTv.setPadding(0, dp(2), 0, dp(2))
         secRoute.addView(routeTv)
         refreshRoute()
@@ -441,6 +459,11 @@ class MainActivity : Activity() {
         cmdEt = EditText(this)
         cmdEt.hint = "Commande, ex. 010D (lecture seule !)"
         cmdEt.setSingleLine(true)
+        // v0.20 : texte blanc, ligne de commande compacte.
+        cmdEt.setTextColor(Color.WHITE)
+        cmdEt.setHintTextColor(0xFFB0BEC5.toInt())
+        cmdEt.minHeight = 0
+        cmdEt.setPadding(dp(8), dp(4), dp(8), dp(4))
         val cmdRow = LinearLayout(this)
         cmdRow.orientation = LinearLayout.HORIZONTAL
         cmdRow.addView(cmdEt, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 3f))
@@ -473,6 +496,7 @@ class MainActivity : Activity() {
         logTv = TextView(this)
         logTv.typeface = Typeface.MONOSPACE
         logTv.textSize = 11f
+        logTv.setTextColor(Color.WHITE)
         logTv.setTextIsSelectable(true)
         logScroll = ScrollView(this)
         logScroll.addView(logTv)
@@ -482,7 +506,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.19 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.20 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2042,7 +2066,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.19 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.20 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2063,7 +2087,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.19 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.20 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2738,7 +2762,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.19 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.20 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
