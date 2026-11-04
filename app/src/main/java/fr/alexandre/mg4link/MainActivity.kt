@@ -286,7 +286,7 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.15.9 - non connecté"
+        statusTv.text = "MG4 Link v0.16 - non connecté"
         root.addView(statusTv)
 
         root.addView(
@@ -402,7 +402,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        log("MG4 Link v0.15.9 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.16 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1099,14 +1099,15 @@ class MainActivity : Activity() {
                     pend.add(Pending(line, st, null))
                     continue
                 }
-                val g = geocode(line)
-                if (g == null) {
+                val gf = geocodeFull(line)
+                if (gf == null) {
                     fails.add(line)
                     log("Adresse introuvable : " + line)
                 } else {
-                    pend.add(Pending(line, null, g))
-                    log("« " + line + " » localisé → " + "%.3f".format(g.lat) + ", " +
-                        "%.3f".format(g.lon))
+                    pend.add(Pending(line, null, gf.first))
+                    log("« " + line + " » localisé → " +
+                        String.format(Locale.US, "%.3f, %.3f", gf.first.lat, gf.first.lon) +
+                        " (" + gf.second + ")")
                 }
                 Thread.sleep(1100) // règle Nominatim : 1 requête/seconde maximum
             }
@@ -1179,21 +1180,32 @@ class MainActivity : Activity() {
     }
 
     /** Géocodage d'une adresse via Nominatim (OpenStreetMap, gratuit). */
-    private fun geocode(addr: String): Geo? {
+    /**
+     * Géocodage Nominatim (v0.16) : limité à France/Espagne/Portugal - une
+     * recherche libre pouvait renvoyer un homonyme au mauvais endroit
+     * (« gorges » -> Gorges en Somme, près d'Amiens, au lieu de la
+     * Loire-Atlantique). Renvoie le lieu ET son nom complet Nominatim
+     * pour confirmation visuelle avant d'ouvrir la carte.
+     */
+    private fun geocodeFull(addr: String): Pair<Geo, String>? {
         return try {
-            val url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=0&q=" +
-                URLEncoder.encode(addr, "UTF-8")
+            val url = "https://nominatim.openstreetmap.org/search?format=json&limit=1" +
+                "&countrycodes=fr,es,pt&addressdetails=0&q=" + URLEncoder.encode(addr, "UTF-8")
             val json = httpGet(url, 15000)
             val lat = Regex("\"lat\"\\s*:\\s*\"(-?[0-9.]+)\"").find(json)?.groupValues?.get(1)
                 ?: return null
             val lon = Regex("\"lon\"\\s*:\\s*\"(-?[0-9.]+)\"").find(json)?.groupValues?.get(1)
                 ?: return null
-            Geo(lat.toDouble(), lon.toDouble())
+            val nom = Regex("\"display_name\"\\s*:\\s*\"([^\"]*)\"")
+                .find(json)?.groupValues?.get(1) ?: addr
+            Pair(Geo(lat.toDouble(), lon.toDouble()), nom)
         } catch (e: Exception) {
             log("Géocodage de « " + addr + " » : " + e.message)
             null
         }
     }
+
+    private fun geocode(addr: String): Geo? = geocodeFull(addr)?.first
 
     /** Distance à vol d'oiseau en km. */
     private fun distKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
@@ -1731,7 +1743,19 @@ class MainActivity : Activity() {
         if (!f.exists()) {
             // v0.14 : repli sur la copie publique (Téléchargements/MG4Link) qui
             // survit à la désinstallation de l'app.
-            val public = loadPublicCache("bornes_cache.txt")
+            var public = loadPublicCache("bornes_cache.txt")
+            // v0.16 : Android (MediaStore) met parfois plusieurs dizaines de
+            // secondes à « voir » les fichiers du dossier Download après le
+            // démarrage du téléphone - le premier essai échouait et l'app
+            // retéléchargeait 92 000 bornes pour rien. On réessaie pendant
+            // ~20 s avant d'abandonner.
+            var essai = 1
+            while (public == null && essai < 5) {
+                try { Thread.sleep(5000L) } catch (e: InterruptedException) { return }
+                log("Cache des bornes : nouvel essai (" + (essai + 1) + "/5)...")
+                public = loadPublicCache("bornes_cache.txt")
+                essai++
+            }
             if (public != null) try { f.writeText(public) } catch (e: Exception) { }
         }
         if (!f.exists()) return
@@ -1762,13 +1786,18 @@ class MainActivity : Activity() {
         return Borne(lat, lon, kw, p[3], p[3], p[4])
     }
 
-    /** Bornes Espagne/Portugal en cache (v0.8). */
-    private fun bornesIberiaFile(): File = File(filesDir, "bornes_iberia.txt")
+    /**
+     * Bornes Espagne/Portugal en cache. v0.16 : nouveau nom de fichier -
+     * l'ancien cache, rempli avec la bbox qui couvrait aussi la France du
+     * sud-ouest, contenait ~28 000 bornes françaises en double. Il est
+     * ignoré ; le nouveau sera écrit à la prochaine mise à jour réussie.
+     */
+    private fun bornesIberiaFile(): File = File(filesDir, "bornes_iberia2.txt")
 
     private fun loadBornesIberia() {
         var f = bornesIberiaFile()
         if (!f.exists()) {
-            val public = loadPublicCache("bornes_iberia.txt")
+            val public = loadPublicCache("bornes_iberia2.txt")
             if (public != null) try { f.writeText(public) } catch (e: Exception) { }
         }
         if (!f.exists()) {
@@ -1837,7 +1866,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.9 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.16 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1858,7 +1887,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.15.9 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.16 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -1997,18 +2026,20 @@ class MainActivity : Activity() {
      * « socket:type2_combo:output ».
      */
     private fun updateBornesIberia(): Int {
-        val zones = listOf(
-            "Espagne" to doubleArrayOf(35.0, -9.9, 43.9, 4.5),
-            "Portugal" to doubleArrayOf(36.5, -9.9, 42.3, -6.0)
-        )
+        // v0.16 : zones par frontières réelles du pays (area ISO3166).
+        val zones = listOf("Espagne" to "ES", "Portugal" to "PT")
         val out = StringBuilder()
         var total = 0
-        for ((pays, bb) in zones) {
+        for ((pays, code) in zones) {
             try {
-                val bbox = fmtD(bb[0]) + "," + fmtD(bb[1]) + "," + fmtD(bb[2]) + "," + fmtD(bb[3])
+                // v0.16 : frontières réelles du pays - la bbox précédente couvrait
+                // aussi le sud-ouest de la France (Bordeaux, Toulouse, Perpignan...)
+                // et Overpass renvoyait ~28 000 bornes françaises en plus des
+                // espagnoles (base gonflée à 123 486 bornes).
                 val q = "[out:csv(::lat,::lon,\"maxpower\",\"socket:type2_combo:output\"," +
                     "\"operator\",\"name\",\"addr:street\",\"addr:housenumber\",\"addr:city\";true;\",\")]" +
-                    "[timeout:180];node[\"amenity\"=\"charging_station\"](" + bbox + ");out;"
+                    "[timeout:300];area[\"ISO3166\"=\"" + code + "\"]->.pays;" +
+                    "node[\"amenity\"=\"charging_station\"](area.pays);out;"
                 val enc = URLEncoder.encode(q, "UTF-8")
                 log("Téléchargement des bornes " + pays + " (OpenStreetMap)...")
                 var header: List<String>? = null
@@ -2057,7 +2088,7 @@ class MainActivity : Activity() {
         }
         if (out.isNotEmpty()) {
             bornesIberiaFile().writeText(out.toString())
-            savePublicCache("bornes_iberia.txt", out.toString())
+            savePublicCache("bornes_iberia2.txt", out.toString())
             getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
                 .putLong("iberiaDate", System.currentTimeMillis())
                 .apply()
@@ -2404,31 +2435,47 @@ class MainActivity : Activity() {
             // v0.15.1 : sans position et sans étape localisée, on propose de
             // saisir un lieu (ville, adresse) recherché sur OpenStreetMap.
             val et = EditText(this)
-            et.hint = "Ex : Gorges, Super U Gétigné…"
+            et.hint = "Ex : Gorges 44, Super U 44190 Gétigné…"
             et.setSingleLine()
             AlertDialog.Builder(this)
                 .setTitle("Autour de quel lieu ?")
                 .setMessage("Aucune position GPS disponible pour l'instant " +
-                    "(normal à l'intérieur). Saisissez un lieu :")
+                    "(normal à l'intérieur). Saisissez un lieu, idéalement avec son " +
+                    "code postal ou son département (ex : Gorges 44) :")
                 .setView(et)
                 .setPositiveButton("Rechercher") { _, _ ->
                     val q = et.text.toString().trim()
                     if (q.isEmpty()) return@setPositiveButton
                     status("Recherche du lieu…")
                     thread(name = "geocode-borne") {
-                        val g = geocode(q)
+                        val gf = geocodeFull(q)
                         handler.post {
                             status("")
-                            if (g == null) {
+                            if (gf == null) {
                                 log("Lieu introuvable : « " + q + " ».")
                                 alert("Lieu introuvable",
                                     "OpenStreetMap n'a pas trouvé « " + q + " ».")
                             } else {
-                                log("« " + q + " » localisé pour la carte des bornes.")
+                                val g = gf.first
+                                val nom = gf.second
+                                log("« " + q + " » localisé → " +
+                                    String.format(Locale.US, "%.3f, %.3f", g.lat, g.lon) +
+                                    " (" + nom + ")")
+                                // v0.16 : confirmation - le lieu géocodé peut être un
+                                // homonyme au mauvais endroit (cf. Gorges/Amiens).
                                 val c = Location("lieu")
                                 c.latitude = g.lat
                                 c.longitude = g.lon
-                                pickRadius(c, "autour de « " + q.take(30) + " »")
+                                AlertDialog.Builder(this)
+                                    .setTitle("C'est bien ce lieu ?")
+                                    .setMessage(nom + "\n\n" +
+                                        String.format(Locale.US, "%.3f, %.3f", g.lat, g.lon) +
+                                        "\n\nContinuer avec ce lieu ?")
+                                    .setPositiveButton("Continuer") { _, _ ->
+                                        pickRadius(c, "autour de « " + q.take(30) + " »")
+                                    }
+                                    .setNegativeButton("Annuler", null)
+                                    .show()
                             }
                         }
                     }
@@ -2502,7 +2549,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.15.9 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.16 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
