@@ -262,6 +262,11 @@ class MainActivity : Activity() {
         val b = Button(this)
         b.text = label
         b.isAllCaps = false
+        // v0.19 : boutons compacts pour agrandir les zones d'affichage.
+        b.textSize = 12f
+        b.minHeight = 0
+        b.minWidth = 0
+        b.setPadding(dp(8), dp(3), dp(8), dp(3))
         b.setOnClickListener { onClick() }
         return b
     }
@@ -281,12 +286,15 @@ class MainActivity : Activity() {
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
-        root.setPadding(dp(10), dp(28), dp(10), dp(10))
+        // v0.19 : couleurs de la maquette utilisateur - fond violet clair,
+        // onglets bleus (Connexion, Code) et roses (Itinéraire, Bornes).
+        root.setBackgroundColor(Color.parseColor("#D8B4FE"))
+        root.setPadding(dp(8), dp(28), dp(8), dp(8))
 
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.18 - non connecté"
+        statusTv.text = "MG4 Link v0.19 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -304,11 +312,17 @@ class MainActivity : Activity() {
         val contents = listOf(secConn, secRoute, secBornes, secCode)
 
         val tabBtns = ArrayList<Button>()
-        for (t in tabTitles) {
+        // v0.19 : une couleur par onglet, comme sur la maquette.
+        val tabColors = intArrayOf(0xFF90CAF9.toInt(), 0xFFFFCDD2.toInt(),
+            0xFFFFCDD2.toInt(), 0xFF90CAF9.toInt())
+        for ((i, t) in tabTitles.withIndex()) {
             val b = Button(this)
             b.text = t
             b.isAllCaps = false
             b.textSize = 13f
+            b.minHeight = 0
+            b.setPadding(dp(4), dp(6), dp(4), dp(6))
+            b.setBackgroundColor(tabColors[i])
             tabBtns.add(b)
         }
         val tabRow = LinearLayout(this)
@@ -366,8 +380,8 @@ class MainActivity : Activity() {
 
         liveTv = TextView(this)
         liveTv.typeface = Typeface.MONOSPACE
-        liveTv.textSize = 13f
-        liveTv.setPadding(0, dp(8), 0, dp(8))
+        liveTv.textSize = 12f
+        liveTv.setPadding(0, dp(3), 0, dp(3))
         secConn.addView(liveTv)
         refreshLive()
 
@@ -405,7 +419,7 @@ class MainActivity : Activity() {
         routeTv = TextView(this)
         routeTv.typeface = Typeface.MONOSPACE
         routeTv.textSize = 12f
-        routeTv.setPadding(0, dp(4), 0, dp(4))
+        routeTv.setPadding(0, dp(2), 0, dp(2))
         secRoute.addView(routeTv)
         refreshRoute()
 
@@ -468,7 +482,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.18 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.19 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2028,7 +2042,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.18 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.19 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2049,7 +2063,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.18 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.19 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2724,7 +2738,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.18 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.19 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
