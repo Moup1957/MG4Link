@@ -1858,8 +1858,13 @@ class MainActivity : Activity() {
                     bornes.clear()
                     bornes.addAll(lst)
                 }
-                log("Base IRVE France en cache : " + lst.size + " bornes (maj il y a " +
-                    (bornesAgeMs() / 3600000L) + " h).")
+                val ageH = bornesAgeMs() / 3600000L
+                // v0.17.1 : après restauration d'un vieux cache, la date de mise
+                // à jour est inconnue (préférence absente) - ne pas afficher un
+                // âge absurde (« 2562047788015 h »).
+                log("Base IRVE France en cache : " + lst.size + " bornes" +
+                    (if (ageH > 100000L) " (date de mise à jour inconnue)." else
+                        " (maj il y a " + ageH + " h)."))
             }
             loadBornesIberia()
         } catch (e: Exception) {
