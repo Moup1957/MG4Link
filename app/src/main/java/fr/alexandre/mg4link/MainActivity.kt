@@ -286,10 +286,61 @@ class MainActivity : Activity() {
         statusTv = TextView(this)
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
-        statusTv.text = "MG4 Link v0.17 - non connecté"
+        statusTv.text = "MG4 Link v0.18 - non connecté"
         root.addView(statusTv)
 
-        root.addView(
+        // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
+        // Bornes, Code (commande + journal). Un seul onglet visible à la fois.
+        fun newSection(): LinearLayout {
+            val s = LinearLayout(this)
+            s.orientation = LinearLayout.VERTICAL
+            return s
+        }
+        val secConn = newSection()
+        val secRoute = newSection()
+        val secBornes = newSection()
+        val secCode = newSection()
+        val tabTitles = listOf("Connexion", "Itinéraire", "Bornes", "Code")
+        val contents = listOf(secConn, secRoute, secBornes, secCode)
+
+        val tabBtns = ArrayList<Button>()
+        for (t in tabTitles) {
+            val b = Button(this)
+            b.text = t
+            b.isAllCaps = false
+            b.textSize = 13f
+            tabBtns.add(b)
+        }
+        val tabRow = LinearLayout(this)
+        tabRow.orientation = LinearLayout.HORIZONTAL
+        for (b in tabBtns) {
+            tabRow.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        root.addView(tabRow)
+        for (i in contents.indices) {
+            if (i == 3) {
+                // Onglet Code : pas de ScrollView englobant, le journal a le sien.
+                root.addView(contents[i], LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            } else {
+                val sc = ScrollView(this)
+                sc.addView(contents[i])
+                root.addView(sc, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            }
+        }
+        fun showTab(i: Int) {
+            for (j in contents.indices) {
+                contents[j].visibility = if (j == i) View.VISIBLE else View.GONE
+                tabBtns[j].setTypeface(null, if (j == i) Typeface.BOLD else Typeface.NORMAL)
+            }
+            // v0.18 : à l'ouverture de l'onglet Code, le journal défile en bas.
+            if (i == 3) logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+        }
+        for (i in tabBtns.indices) tabBtns[i].setOnClickListener { showTab(i) }
+
+        // ----- Onglet CONNEXION -----
+        secConn.addView(
             row(
                 makeButton("Scanner et connecter") { startScan() },
                 makeButton("Déconnecter") {
@@ -303,24 +354,25 @@ class MainActivity : Activity() {
         liveSwitch = Switch(this)
         liveSwitch.text = "Lecture live"
         liveSwitch.setOnCheckedChangeListener { _, on -> setLive(on) }
-        root.addView(
+        secConn.addView(
             row(
                 makeButton("Tests de base") { testsBase() },
                 makeButton("Tests batterie") { testsBatterie() }
             )
         )
-        root.addView(liveSwitch)
+        secConn.addView(liveSwitch)
 
-        root.addView(row(makeButton("Charge affichée…") { askSoc() }))
+        secConn.addView(row(makeButton("Charge affichée…") { askSoc() }))
 
         liveTv = TextView(this)
         liveTv.typeface = Typeface.MONOSPACE
         liveTv.textSize = 13f
         liveTv.setPadding(0, dp(8), 0, dp(8))
-        root.addView(liveTv)
+        secConn.addView(liveTv)
         refreshLive()
 
-        root.addView(
+        // ----- Onglet ITINÉRAIRE -----
+        secRoute.addView(
             row(
                 makeButton("Itinéraire…") { editStages() },
                 makeButton("Démarrer le trajet") { startTrip() },
@@ -328,14 +380,14 @@ class MainActivity : Activity() {
             )
         )
 
-        root.addView(
+        secRoute.addView(
             row(
                 makeButton("Itinéraire dans Maps") { openInMaps() },
                 makeButton("Fenêtre flottante") { toggleOverlay() }
             )
         )
 
-        root.addView(
+        secRoute.addView(
             row(
                 makeButton("Sauver itinéraire") { saveItinerary() },
                 makeButton("Charger itinéraire") { loadItinerary() },
@@ -343,20 +395,8 @@ class MainActivity : Activity() {
             )
         )
 
-        root.addView(
-            row(
-                makeButton("Bornes recharge") { showBornes() },
-                makeButton("Mettre à jour bornes") { updateBornes(true) }
-            )
-        )
-
-        root.addView(
-            row(
-                makeButton("Carte bornes…") { showBornesMap() }
-            )
-        )
-
-        root.addView(
+        // v0.18 : « Supprimer étape » déplacé dans l'onglet Itinéraire.
+        secRoute.addView(
             row(
                 makeButton("Supprimer étape…") { removeStage() }
             )
@@ -366,9 +406,24 @@ class MainActivity : Activity() {
         routeTv.typeface = Typeface.MONOSPACE
         routeTv.textSize = 12f
         routeTv.setPadding(0, dp(4), 0, dp(4))
-        root.addView(routeTv)
+        secRoute.addView(routeTv)
         refreshRoute()
 
+        // ----- Onglet BORNES -----
+        secBornes.addView(
+            row(
+                makeButton("Bornes recharge") { showBornes() },
+                makeButton("Mettre à jour bornes") { updateBornes(true) }
+            )
+        )
+
+        secBornes.addView(
+            row(
+                makeButton("Carte bornes…") { showBornesMap() }
+            )
+        )
+
+        // ----- Onglet CODE (commande + journal) -----
         cmdEt = EditText(this)
         cmdEt.hint = "Commande, ex. 010D (lecture seule !)"
         cmdEt.setSingleLine(true)
@@ -379,15 +434,24 @@ class MainActivity : Activity() {
             makeButton("Envoyer") { sendManual() },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f)
         )
-        root.addView(cmdRow)
+        secCode.addView(cmdRow)
 
-        root.addView(
+        // v0.18 : confirmation avant d'effacer le journal (effacements
+        // accidentels en touchant le bouton pendant un défilement).
+        secCode.addView(
             row(
                 makeButton("Copier") { copyLog() },
                 makeButton("Partager") { shareLog() },
                 makeButton("Effacer") {
-                    synchronized(logBuf) { logBuf.setLength(0) }
-                    logTv.text = ""
+                    AlertDialog.Builder(this)
+                        .setTitle("Effacer le journal ?")
+                        .setMessage("Tout l'historique affiché sera vidé.")
+                        .setPositiveButton("Effacer") { _, _ ->
+                            synchronized(logBuf) { logBuf.setLength(0) }
+                            logTv.text = ""
+                        }
+                        .setNegativeButton("Annuler", null)
+                        .show()
                 }
             )
         )
@@ -398,11 +462,13 @@ class MainActivity : Activity() {
         logTv.setTextIsSelectable(true)
         logScroll = ScrollView(this)
         logScroll.addView(logTv)
-        root.addView(logScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        secCode.addView(logScroll, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
+        showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.17 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.18 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1962,7 +2028,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.17 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.18 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -1983,7 +2049,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.17 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.18 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2658,7 +2724,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.17 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.18 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
