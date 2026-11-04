@@ -15,8 +15,8 @@
 
     <application
         android:allowBackup="false"
-        android:icon="@drawable/icone_mg"
-        android:roundIcon="@drawable/icone_mg"
+        android:icon="@drawable/icone_v19"
+        android:roundIcon="@drawable/icone_v19"
         android:label="MG4 Link"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity
