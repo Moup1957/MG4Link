@@ -322,7 +322,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.21 - non connecté"
+        statusTv.text = "MG4 Link v0.22 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -539,7 +539,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.21 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.22 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2099,7 +2099,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.21 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.22 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2120,7 +2120,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.21 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.22 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2230,9 +2230,15 @@ class MainActivity : Activity() {
                 log("Base IRVE France chargée : " + bornes.size + " bornes ≥ 22 kW (" + n + " lignes).")
                 // Espagne + Portugal : retéléchargés seulement si le cache a plus de
                 // 7 jours (v0.15) - le serveur Overpass bloque les requêtes répétées.
-                val iAge = System.currentTimeMillis() - getSharedPreferences(
-                    "mg4link", Context.MODE_PRIVATE).getLong("iberiaDate", 0L)
-                if (iAge in 1 until 7L * 24 * 3600 * 1000) {
+                val prefsB = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+                val iAge = System.currentTimeMillis() - prefsB.getLong("iberiaDate", 0L)
+                // v0.22 : un nouveau fichier officiel espagnol déposé dans
+                // Download/MG4Link est pris en compte immédiatement, même si
+                // le cache a moins de 7 jours.
+                val esXmlF = findEsXmlFile()
+                val xmlNouveau = esXmlF != null &&
+                    esXmlF.lastModified() > prefsB.getLong("iberiaDate", 0L)
+                if (iAge in 1 until 7L * 24 * 3600 * 1000 && !xmlNouveau) {
                     log("Bornes Espagne/Portugal : cache de moins de 7 jours, pas de retéléchargement.")
                 } else {
                     updateBornesIberia()
@@ -2252,6 +2258,76 @@ class MainActivity : Activity() {
     }
 
     /**
+     * v0.22 : import du fichier XML officiel espagnol (MITECO,
+     * « Instalaciones públicas de recarga ») posé par l'utilisateur
+     * dans Download/MG4Link. Chaque bloc <INSTALACION> décrit un
+     * CONNECTEUR ; on regroupe par point de recharge
+     * (IDPUNTODERECARGA) en gardant la puissance maximale.
+     */
+    private fun findEsXmlFile(): File? {
+        try {
+            val files = publicDir().listFiles()?.filter {
+                it.isFile && it.name.endsWith(".xml", ignoreCase = true) &&
+                    it.name.contains("nstalaciones", ignoreCase = true)
+            } ?: return null
+            return files.maxByOrNull { it.lastModified() }
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    private fun importEsXml(out: StringBuilder): Int {
+        val f = findEsXmlFile() ?: return 0
+        try {
+            log("Espagne : lecture du fichier officiel MITECO " + f.name +
+                " (" + (f.length() / 1048576L) + " Mo)...")
+            val text = f.readText()
+            // Regroupement par point de recharge : plusieurs connecteurs
+            // (50 kW CCS + 22 kW T2...) partagent le même IDPUNTODERECARGA.
+            val byPoint = LinkedHashMap<String, Borne>()
+            for (block in text.split("<INSTALACION>")) {
+                fun tag(n: String): String {
+                    val m = Regex("<" + n + ">(.*?)</" + n + ">").find(block)
+                    return m?.groupValues?.get(1)?.trim() ?: ""
+                }
+                val lat = tag("LATITUD").toDoubleOrNull() ?: continue
+                val lon = tag("LONGITUD").toDoubleOrNull() ?: continue
+                // v0.22 : « 350,00 kW » (virgule décimale espagnole).
+                val kw = kwFromTag(tag("POTENCIAMAXIMA"))
+                if (kw < 22.0) continue
+                val id = tag("IDPUNTODERECARGA")
+                val key = if (id.isNotEmpty()) id else (tag("NOMBREINSTALACION") + lat + lon)
+                val old = byPoint[key]
+                if (old != null) {
+                    if (kw > old.kw) byPoint[key] = Borne(lat, lon, kw, old.enseigne, old.nom, old.adresse)
+                    continue
+                }
+                val operador = tag("NOMBREOPERADOR")
+                val nom = tag("NOMBREINSTALACION")
+                val dir = tag("DIRECCION")
+                val muni = tag("MUNICIPIO")
+                val enseigne = "Espagne - " + (if (operador.isNotEmpty()) operador else nom)
+                val adresse = dir + (if (dir.isNotEmpty() && muni.isNotEmpty()) ", " else "") + muni
+                byPoint[key] = Borne(lat, lon, kw, enseigne,
+                    nom.ifEmpty { "Point de recharge" }, adresse)
+            }
+            if (byPoint.isEmpty()) {
+                log("Fichier espagnol lu mais aucun point ≥ 22 kW trouvé.")
+                return 0
+            }
+            val lst = byPoint.values.toList()
+            synchronized(bornes) { bornes.addAll(lst) }
+            lst.forEach { out.append(cacheLine(it)) }
+            log("Bornes Espagne (base officielle MITECO) : " + lst.size +
+                " points de recharge ≥ 22 kW.")
+            return lst.size
+        } catch (e: Exception) {
+            log("Erreur lecture fichier espagnol : " + e.message)
+            return 0
+        }
+    }
+
+    /**
      * Bornes Espagne + Portugal (v0.8) via l'API Overpass (OpenStreetMap).
      * Les registres officiels RIPREE / MOBI.E n'ont pas de téléchargement CSV
      * direct et stable : OpenStreetMap est gratuit, sans clé et mis à jour
@@ -2265,6 +2341,18 @@ class MainActivity : Activity() {
         var total = 0
         for ((pays, code) in zones) {
             try {
+                // v0.22 : pour l'Espagne, la base officielle MITECO (fichier
+                // XML posé dans Download/MG4Link) est bien plus complète
+                // qu'OpenStreetMap - on l'utilise dès qu'elle est présente.
+                if (pays == "Espagne") {
+                    val nXml = importEsXml(out)
+                    if (nXml > 0) {
+                        log("Bornes " + pays + " : " + nXml +
+                            " bornes ajoutées (base officielle, Overpass ignoré).")
+                        total += nXml
+                        continue
+                    }
+                }
                 val csv = "[out:csv(::lat,::lon,\"maxpower\",\"socket:type2_combo:output\"," +
                     "\"operator\",\"name\",\"addr:street\",\"addr:housenumber\",\"addr:city\";true;\",\")]"
                 val bbox = if (code == "ES") "35.0,-9.9,43.9,4.5" else "36.5,-9.9,42.3,-6.0"
@@ -2795,7 +2883,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.21 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.22 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
