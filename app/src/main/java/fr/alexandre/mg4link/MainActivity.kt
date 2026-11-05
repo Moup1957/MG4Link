@@ -322,7 +322,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.22 - non connecté"
+        statusTv.text = "MG4 Link v0.23 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -539,7 +539,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.22 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.23 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2099,7 +2099,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.22 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.23 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2120,7 +2120,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.22 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.23 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2150,6 +2150,32 @@ class MainActivity : Activity() {
         log("Mise à jour de la base IRVE France (Wi-Fi conseillé, 1 à 2 min)...")
         thread(name = "bornes-dl") {
             try {
+                // v0.23 : si la base France en cache est récente (moins de
+                // 7 jours) et qu'un fichier officiel espagnol plus récent que
+                // le dernier import est présent, on importe l'Espagne et le
+                // Portugal directement, sans retélécharger les ~125 000
+                // bornes françaises (1 à 2 minutes économisées).
+                val prefsX = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+                val frRecent = bornesFile().exists() &&
+                    System.currentTimeMillis() - prefsX.getLong("bornesDate", 0L) <
+                    7L * 24L * 3600L * 1000L
+                val esF = findEsXmlFile()
+                if (frRecent && esF != null &&
+                    esF.lastModified() > prefsX.getLong("iberiaDate", 0L)) {
+                    log("Fichier espagnol officiel détecté - import direct " +
+                        "(base France conservée depuis le cache).")
+                    synchronized(bornes) { bornes.clear() }
+                    bornesFile().forEachLine { line ->
+                        parseBorneCache(line)?.let { b ->
+                            synchronized(bornes) { bornes.add(b) }
+                        }
+                    }
+                    log("France : " + bornes.size + " bornes rechargées depuis le cache.")
+                    updateBornesIberia()
+                    log("Base complète chargée : " + bornes.size +
+                        " bornes (France en cache + Espagne + Portugal).")
+                    return@thread
+                }
                 val api = "https://www.data.gouv.fr/api/1/datasets/" +
                     "base-nationale-des-irve-data-gouv-infrastructures-de-recharge-pour-vehicules-electriques-donnees-statiques/"
                 val json = httpGet(api, 30000)
@@ -2279,38 +2305,36 @@ class MainActivity : Activity() {
     private fun importEsXml(out: StringBuilder): Int {
         val f = findEsXmlFile() ?: return 0
         try {
-            log("Espagne : lecture du fichier officiel MITECO " + f.name +
+            log("Espagne : lecture en flux du fichier officiel MITECO " + f.name +
                 " (" + (f.length() / 1048576L) + " Mo)...")
-            val text = f.readText()
             // Regroupement par point de recharge : plusieurs connecteurs
             // (50 kW CCS + 22 kW T2...) partagent le même IDPUNTODERECARGA.
             val byPoint = LinkedHashMap<String, Borne>()
-            for (block in text.split("<INSTALACION>")) {
-                fun tag(n: String): String {
-                    val m = Regex("<" + n + ">(.*?)</" + n + ">").find(block)
-                    return m?.groupValues?.get(1)?.trim() ?: ""
+            // v0.23 : le fichier fait ~55 Mo - le charger en mémoire d'un coup
+            // (readText) faisait planter l'application par manque de mémoire.
+            // On lit maintenant ligne par ligne : un seul bloc <INSTALACION>
+            // (quelques ko) est en mémoire à la fois.
+            val block = StringBuilder()
+            fun flush() {
+                if (block.isNotEmpty()) {
+                    parseEsBlock(block.toString(), byPoint)
+                    block.setLength(0)
                 }
-                val lat = tag("LATITUD").toDoubleOrNull() ?: continue
-                val lon = tag("LONGITUD").toDoubleOrNull() ?: continue
-                // v0.22 : « 350,00 kW » (virgule décimale espagnole).
-                val kw = kwFromTag(tag("POTENCIAMAXIMA"))
-                if (kw < 22.0) continue
-                val id = tag("IDPUNTODERECARGA")
-                val key = if (id.isNotEmpty()) id else (tag("NOMBREINSTALACION") + lat + lon)
-                val old = byPoint[key]
-                if (old != null) {
-                    if (kw > old.kw) byPoint[key] = Borne(lat, lon, kw, old.enseigne, old.nom, old.adresse)
-                    continue
-                }
-                val operador = tag("NOMBREOPERADOR")
-                val nom = tag("NOMBREINSTALACION")
-                val dir = tag("DIRECCION")
-                val muni = tag("MUNICIPIO")
-                val enseigne = "Espagne - " + (if (operador.isNotEmpty()) operador else nom)
-                val adresse = dir + (if (dir.isNotEmpty() && muni.isNotEmpty()) ", " else "") + muni
-                byPoint[key] = Borne(lat, lon, kw, enseigne,
-                    nom.ifEmpty { "Point de recharge" }, adresse)
             }
+            java.io.BufferedReader(java.io.InputStreamReader(
+                java.io.FileInputStream(f), Charsets.UTF_8)).use { br ->
+                var line = br.readLine()
+                while (line != null) {
+                    if (line.contains("<INSTALACION>")) {
+                        flush()
+                        block.append(line.substringAfter("<INSTALACION>"))
+                    } else if (block.isNotEmpty()) {
+                        block.append('\n').append(line)
+                    }
+                    line = br.readLine()
+                }
+            }
+            flush()
             if (byPoint.isEmpty()) {
                 log("Fichier espagnol lu mais aucun point ≥ 22 kW trouvé.")
                 return 0
@@ -2325,6 +2349,39 @@ class MainActivity : Activity() {
             log("Erreur lecture fichier espagnol : " + e.message)
             return 0
         }
+    }
+
+    /**
+     * v0.23 : analyse d'un bloc <INSTALACION> (1 connecteur) du fichier
+     * MITECO, extrait de importEsXml pour la lecture en flux. Le connecteur
+     * est regroupé par point de recharge (IDPUNTODERECARGA) dans byPoint,
+     * en gardant la puissance maximale du point.
+     */
+    private fun parseEsBlock(block: String, byPoint: LinkedHashMap<String, Borne>) {
+        fun tag(n: String): String {
+            val m = Regex("<" + n + ">(.*?)</" + n + ">").find(block)
+            return m?.groupValues?.get(1)?.trim() ?: ""
+        }
+        val lat = tag("LATITUD").toDoubleOrNull() ?: return
+        val lon = tag("LONGITUD").toDoubleOrNull() ?: return
+        // « 350,00 kW » (virgule décimale espagnole).
+        val kw = kwFromTag(tag("POTENCIAMAXIMA"))
+        if (kw < 22.0) return
+        val id = tag("IDPUNTODERECARGA")
+        val key = if (id.isNotEmpty()) id else (tag("NOMBREINSTALACION") + lat + lon)
+        val old = byPoint[key]
+        if (old != null) {
+            if (kw > old.kw) byPoint[key] = Borne(lat, lon, kw, old.enseigne, old.nom, old.adresse)
+            return
+        }
+        val operador = tag("NOMBREOPERADOR")
+        val nom = tag("NOMBREINSTALACION")
+        val dir = tag("DIRECCION")
+        val muni = tag("MUNICIPIO")
+        val enseigne = "Espagne - " + (if (operador.isNotEmpty()) operador else nom)
+        val adresse = dir + (if (dir.isNotEmpty() && muni.isNotEmpty()) ", " else "") + muni
+        byPoint[key] = Borne(lat, lon, kw, enseigne,
+            nom.ifEmpty { "Point de recharge" }, adresse)
     }
 
     /**
@@ -2883,7 +2940,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.22 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.23 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
