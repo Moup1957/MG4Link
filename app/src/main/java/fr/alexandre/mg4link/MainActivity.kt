@@ -2403,7 +2403,11 @@ class MainActivity : Activity() {
             if (kw > old.kw) byPoint[key] = Borne(lat, lon, kw, old.enseigne, old.nom, old.adresse)
             return
         }
-        val operador = tag("NOMBREOPERADOR")
+        // v0.26 : l'opérateur peut s'écrire <NOMBREOPERADOR>,
+        // <NOMBRE_OPERADOR> ou <NOMBRE OPERADOR> selon les exports - on
+        // essaie les trois formes.
+        val operador = listOf("NOMBREOPERADOR", "NOMBRE_OPERADOR", "NOMBRE OPERADOR")
+            .map { tag(it) }.firstOrNull { it.isNotEmpty() } ?: ""
         val nom = tag("NOMBREINSTALACION")
         val dir = tag("DIRECCION")
         val muni = tag("MUNICIPIO")
