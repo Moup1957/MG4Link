@@ -21,6 +21,8 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -258,6 +260,23 @@ class MainActivity : Activity() {
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
+    /** v0.21 : fond de bouton avec cadre double trait (effet de relief
+     * sur l'écran noir) : liseré extérieur + fond en retrait avec son
+     * propre liseré clair. */
+    private fun framedBg(fill: Int): LayerDrawable {
+        val fond = GradientDrawable()
+        fond.setColor(fill)
+        fond.cornerRadius = dp(4).toFloat()
+        fond.setStroke(dp(1), 0xFF90A4AE.toInt())
+        val cadre = GradientDrawable()
+        cadre.setColor(0xFF455A64.toInt())
+        cadre.cornerRadius = dp(4).toFloat()
+        cadre.setStroke(dp(1), 0xFF546E7A.toInt())
+        val layers = LayerDrawable(arrayOf(cadre, fond))
+        layers.setLayerInset(1, dp(2), dp(2), dp(2), dp(2))
+        return layers
+    }
+
     private fun makeButton(label: String, onClick: () -> Unit): Button {
         val b = Button(this)
         b.text = label
@@ -266,10 +285,11 @@ class MainActivity : Activity() {
         b.textSize = 12f
         b.minHeight = 0
         b.minWidth = 0
-        b.setPadding(dp(8), dp(3), dp(8), dp(3))
-        // v0.20 : thème sombre - boutons gris foncé, texte blanc.
+        b.setPadding(dp(8), dp(5), dp(8), dp(5))
+        // v0.20 : thème sombre - texte blanc sur fond gris foncé.
         b.setTextColor(Color.WHITE)
-        b.setBackgroundColor(0xFF37474F.toInt())
+        // v0.21 : cadre double trait pour donner du volume au bouton.
+        b.background = framedBg(0xFF37474F.toInt())
         b.setOnClickListener { onClick() }
         return b
     }
@@ -278,7 +298,11 @@ class MainActivity : Activity() {
         val r = LinearLayout(this)
         r.orientation = LinearLayout.HORIZONTAL
         for (v in views) {
-            r.addView(v, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            val lp = LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            // v0.21 : espace entre les boutons (séparation).
+            lp.setMargins(dp(2), dp(2), dp(2), dp(2))
+            r.addView(v, lp)
         }
         return r
     }
@@ -298,7 +322,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.20 - non connecté"
+        statusTv.text = "MG4 Link v0.21 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -326,7 +350,8 @@ class MainActivity : Activity() {
             b.minHeight = 0
             b.setPadding(dp(4), dp(6), dp(4), dp(6))
             b.setTextColor(Color.WHITE)
-            b.setBackgroundColor(0xFF424242.toInt())
+            // v0.21 : cadre double trait aussi sur les onglets.
+            b.background = framedBg(0xFF424242.toInt())
             tabBtns.add(b)
         }
         val tabRow = LinearLayout(this)
@@ -335,6 +360,12 @@ class MainActivity : Activity() {
             tabRow.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
         root.addView(tabRow)
+        // v0.21 : on masque le VRAI conteneur ajouté à root (section ou
+        // ScrollView). Avant, on ne masquait que la section INTÉRIEURE :
+        // les ScrollView vides des onglets Itinéraire/Bornes restaient
+        // visibles et occupaient chacune un tiers de l'écran, ce qui
+        // poussait le contenu des autres onglets vers le bas.
+        val containers = ArrayList<View>()
         for (i in contents.indices) {
             if (i == 0 || i == 3) {
                 // v0.20 : Connexion et Code ne défilent pas - leur zone
@@ -342,18 +373,20 @@ class MainActivity : Activity() {
                 // hauteur restante (weight 1).
                 root.addView(contents[i], LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+                containers.add(contents[i])
             } else {
                 val sc = ScrollView(this)
                 sc.addView(contents[i])
                 root.addView(sc, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+                containers.add(sc)
             }
         }
         fun showTab(i: Int) {
-            for (j in contents.indices) {
-                contents[j].visibility = if (j == i) View.VISIBLE else View.GONE
+            for (j in containers.indices) {
+                containers[j].visibility = if (j == i) View.VISIBLE else View.GONE
                 // v0.20 : onglet actif vert, les autres gris foncé.
-                tabBtns[j].setBackgroundColor(
+                tabBtns[j].background = framedBg(
                     if (j == i) 0xFF2E7D32.toInt() else 0xFF424242.toInt())
                 tabBtns[j].setTextColor(Color.WHITE)
                 tabBtns[j].setTypeface(null, if (j == i) Typeface.BOLD else Typeface.NORMAL)
@@ -506,7 +539,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.20 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.21 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2066,7 +2099,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.20 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.21 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2087,7 +2120,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.20 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.21 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2762,7 +2795,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.20 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.21 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
