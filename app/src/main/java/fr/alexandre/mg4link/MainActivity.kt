@@ -322,7 +322,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.26 - non connecté"
+        statusTv.text = "MG4 Link v0.27 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -539,7 +539,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.26 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.27 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2099,7 +2099,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.26 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.27 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2120,7 +2120,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.26 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.27 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2704,7 +2704,7 @@ class MainActivity : Activity() {
         }
         val labels = arr.map {
             val b = it.b
-            (if (b.enseigne.isNotEmpty()) b.enseigne else b.nom) + "\n" +
+            reseauOf(b) + "\n" +
                 "%.1f".format(it.km) + " km - " + "%.0f".format(b.kw) + " kW - " +
                 b.adresse.take(38)
         }.toTypedArray()
@@ -2796,11 +2796,36 @@ class MainActivity : Activity() {
      * réseaux de l'utilisateur). Le rapprochement se fait sur le nom de
      * l'enseigne/enseigne de la base IRVE.
      */
-    /** v0.24 : opérateur/réseau d'une borne, pour le filtre et l'affichage. */
-    private fun operateurOf(b: Borne): String {
-        val t = (b.enseigne + " " + b.nom).trim()
-        return if (t.isNotEmpty()) t else "Opérateur ?"
+    /** v0.27 : nom de réseau COURT d'une borne (Tesla, Ionity, Zunder...),
+     * reconnu à partir de l'enseigne/nom brut des bases (qui contiennent des
+     * noms juridiques : « IONITY SAS », « Espagne - IBERDROLA CLIENTES »...).
+     * Utilisé pour le filtre par opérateur et l'affichage, France/Espagne/
+     * Portugal confondus. */
+    private fun reseauOf(b: Borne): String {
+        val t = (b.enseigne + " " + b.nom).lowercase(Locale.ROOT)
+        val reseaux = listOf(
+            "ionity" to "Ionity", "tesla" to "Tesla", "zunder" to "Zunder",
+            "electra" to "Electra", "iberdrola" to "Iberdrola", "endesa" to "Endesa",
+            "repsol" to "Repsol", "wenea" to "Wenea", "atlante" to "Atlante",
+            "totalenergies" to "TotalEnergies", "shell" to "Shell Recharge",
+            "fastned" to "Fastned", "allego" to "Allego", "izivia" to "Izivia",
+            "freshmile" to "Freshmile", "engie" to "Engie", "edf" to "EDF",
+            "edp" to "EDP", "galp" to "Galp", "mobie" to "Mobi.E",
+            "chargepoint" to "ChargePoint", "interparking" to "Interparking",
+            "carrefour" to "Carrefour", "leclerc" to "Leclerc", "lidl" to "Lidl",
+            "porsche" to "Porsche", "audi" to "Audi", "stellantis" to "Stellantis",
+            "renault" to "Renault", "mobilize" to "Mobilize", "bouygues" to "Bouygues",
+            "evy1" to "Evy1", "gireve" to "Gireve")
+        for ((mot, nom) in reseaux) if (t.contains(mot)) return nom
+        // Repli : l'enseigne brute, débarrassée du préfixe pays.
+        var s = b.enseigne.removePrefix("Espagne - ").trim()
+        if (s.isEmpty()) s = b.nom.trim()
+        if (s.isEmpty()) return "Réseau ?"
+        return s.take(24)
     }
+
+    /** Réseau court d'une borne, pour le filtre et l'affichage (v0.27). */
+    private fun operateurOf(b: Borne): String = reseauOf(b)
 
     /**
      * v0.24 : réseaux les plus fréquents dans la zone (puissance et rayon
@@ -2995,8 +3020,7 @@ class MainActivity : Activity() {
                 // (Uncaught SyntaxError: Unexpected number).
                 .append(",km:").append(String.format(Locale.US, "%.1f", n.km))
                 .append(",kw:").append(String.format(Locale.US, "%.0f", n.b.kw))
-                .append(",nom:\"").append(escapeJs(
-                    if (n.b.enseigne.isNotEmpty()) n.b.enseigne else n.b.nom)).append("\"")
+                .append(",nom:\"").append(escapeJs(reseauOf(n.b))).append("\"")
                 .append(",adresse:\"").append(escapeJs(n.b.adresse)).append("\"}")
         }
         data.append("]")
@@ -3026,7 +3050,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.26 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.27 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
