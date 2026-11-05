@@ -322,7 +322,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.23 - non connecté"
+        statusTv.text = "MG4 Link v0.24 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -539,7 +539,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.23 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.24 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2099,7 +2099,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.23 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.24 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2120,7 +2120,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.23 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.24 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2564,6 +2564,23 @@ class MainActivity : Activity() {
         }
         // Zone de recherche (v0.10) : autour de ma position ou autour de la prochaine étape.
         val nextStage = stages.getOrNull(if (tripActive) stageIdx else 0)
+        fun pickOperator(center: Location, zoneLabel: String, radiusKm: Double,
+                         minKw: Double) {
+            // v0.24 : filtre par opérateur - les réseaux proposés sont
+            // ceux réellement présents dans la zone (les plus fréquents).
+            val ops = topOperateurs(center, radiusKm, minKw)
+            val labels = ArrayList<String>()
+            labels.add("Tous les opérateurs (" + ops.size + " réseaux)")
+            labels.addAll(ops)
+            AlertDialog.Builder(this)
+                .setTitle("Réseau / opérateur ?")
+                .setItems(labels.toTypedArray()) { _, i ->
+                    listBornes(minKw, center, radiusKm, zoneLabel,
+                        if (i == 0) null else labels[i])
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
         fun choosePower(center: Location, zoneLabel: String, radiusKm: Double) {
             val filtres = arrayOf("Toutes (≥ 22 kW)", "≥ 50 kW", "≥ 100 kW", "≥ 150 kW")
             AlertDialog.Builder(this)
@@ -2575,19 +2592,20 @@ class MainActivity : Activity() {
                         3 -> 150.0
                         else -> 22.0
                     }
-                    listBornes(minKw, center, radiusKm, zoneLabel)
+                    pickOperator(center, zoneLabel, radiusKm, minKw)
                 }
                 .setNegativeButton("Annuler", null)
                 .show()
         }
         fun chooseRadius(center: Location, zoneLabel: String) {
-            val rayons = arrayOf("5 km", "10 km", "25 km")
+            val rayons = arrayOf("5 km", "10 km", "25 km", "50 km")
             AlertDialog.Builder(this)
                 .setTitle("Rayon de recherche (" + zoneLabel + ")")
                 .setItems(rayons) { _, i ->
                     val r = when (i) {
                         1 -> 10.0
                         2 -> 25.0
+                        3 -> 50.0
                         else -> 5.0
                     }
                     choosePower(center, zoneLabel, r)
@@ -2628,10 +2646,13 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun listBornes(minKw: Double, loc: Location, radiusKm: Double, zoneLabel: String) {
+    private fun listBornes(minKw: Double, loc: Location, radiusKm: Double, zoneLabel: String,
+                           operateur: String? = null) {
         class NearB(val b: Borne, val km: Double)
         val arr: List<NearB> = synchronized(bornes) {
-            bornes.filter { it.kw >= minKw }
+            bornes.filter { it.kw >= minKw &&
+                (operateur == null ||
+                    (it.enseigne + " " + it.nom).contains(operateur, true)) }
                 .map { b ->
                     val d = FloatArray(1)
                     Location.distanceBetween(loc.latitude, loc.longitude, b.lat, b.lon, d)
@@ -2656,7 +2677,8 @@ class MainActivity : Activity() {
         }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("Bornes ≥ " + "%.0f".format(minKw) + " kW, " +
-                "%.0f".format(radiusKm) + " km max, " + zoneLabel)
+                "%.0f".format(radiusKm) + " km max, " + zoneLabel +
+                (operateur?.let { " - " + it } ?: ""))
             .setItems(labels) { _, i -> borneAction(arr[i].b, arr[i].km) }
             .setNegativeButton("Fermer", null)
             .show()
@@ -2741,19 +2763,31 @@ class MainActivity : Activity() {
      * réseaux de l'utilisateur). Le rapprochement se fait sur le nom de
      * l'enseigne/enseigne de la base IRVE.
      */
-    private fun badgeFor(b: Borne): String? {
-        val t = (b.enseigne + " " + b.nom).lowercase(Locale.ROOT)
-        return when {
-            t.contains("ionity") -> "Ionity (Electroverse)"
-            t.contains("electroverse") -> "Electroverse"
-            t.contains("electra") -> "Electra"
-            t.contains("chargemap") -> "Chargemap"
-            t.contains("mobilize") || t.contains("mobilise") -> "Mobilize"
-            t.contains("atlante") -> "Atlante"
-            t.contains("shell") -> "Shell Recharge"
-            t.contains("plugsurfing") -> "Plugsurfing"
-            else -> null
+    /** v0.24 : opérateur/réseau d'une borne, pour le filtre et l'affichage. */
+    private fun operateurOf(b: Borne): String {
+        val t = (b.enseigne + " " + b.nom).trim()
+        return if (t.isNotEmpty()) t else "Opérateur ?"
+    }
+
+    /**
+     * v0.24 : réseaux les plus fréquents dans la zone (puissance et rayon
+     * déjà choisis), pour proposer le filtre par opérateur. Le plus fréquent
+     * en premier, 12 maximum. Remplace l'ancien système de « cartes de
+     * recharge » qui ne colorait que les points sans filtrer.
+     */
+    private fun topOperateurs(loc: Location, radiusKm: Double, minKw: Double): List<String> {
+        val counts = LinkedHashMap<String, Int>()
+        synchronized(bornes) {
+            for (b in bornes) {
+                if (b.kw < minKw) continue
+                val d = FloatArray(1)
+                Location.distanceBetween(loc.latitude, loc.longitude, b.lat, b.lon, d)
+                if (d[0] / 1000.0 > radiusKm) continue
+                val op = operateurOf(b)
+                counts[op] = (counts[op] ?: 0) + 1
+            }
         }
+        return counts.entries.sortedByDescending { it.value }.take(12).map { it.key }
     }
 
     /** Échappe une chaîne pour l'insérer dans le JavaScript de la carte. */
@@ -2769,6 +2803,23 @@ class MainActivity : Activity() {
         }
         val nextStage = stages.getOrNull(if (tripActive) stageIdx else 0)
         val here = lastLoc ?: bestLoc()
+        fun pickOperator(center: Location, zoneLabel: String, radiusKm: Double,
+                         minKw: Double) {
+            // v0.24 : filtre par opérateur - réseaux réellement présents
+            // dans la zone (les plus fréquents d'abord).
+            val ops = topOperateurs(center, radiusKm, minKw)
+            val labels = ArrayList<String>()
+            labels.add("Tous les opérateurs (" + ops.size + " réseaux)")
+            labels.addAll(ops)
+            AlertDialog.Builder(this)
+                .setTitle("Réseau / opérateur ?")
+                .setItems(labels.toTypedArray()) { _, i ->
+                    openBornesMap(minKw, center, radiusKm, zoneLabel,
+                        if (i == 0) null else labels[i])
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
         fun pickPower(center: Location, zoneLabel: String, radiusKm: Double) {
             val filtres = arrayOf("Toutes (≥ 22 kW)", "≥ 50 kW", "≥ 100 kW", "≥ 150 kW")
             AlertDialog.Builder(this)
@@ -2780,7 +2831,7 @@ class MainActivity : Activity() {
                         3 -> 150.0
                         else -> 22.0
                     }
-                    openBornesMap(minKw, center, radiusKm, zoneLabel)
+                    pickOperator(center, zoneLabel, radiusKm, minKw)
                 }
                 .setNegativeButton("Annuler", null)
                 .show()
@@ -2877,14 +2928,17 @@ class MainActivity : Activity() {
     }
 
     /** Ouvre la carte interactive des bornes (OpenStreetMap + Leaflet). */
-    private fun openBornesMap(minKw: Double, loc: Location, radiusKm: Double, zoneLabel: String) {
-        class NearB(val b: Borne, val km: Double, val badge: String?)
+    private fun openBornesMap(minKw: Double, loc: Location, radiusKm: Double, zoneLabel: String,
+                              operateur: String? = null) {
+        class NearB(val b: Borne, val km: Double)
         val arr: List<NearB> = synchronized(bornes) {
-            bornes.filter { it.kw >= minKw }
+            bornes.filter { it.kw >= minKw &&
+                (operateur == null ||
+                    (it.enseigne + " " + it.nom).contains(operateur, true)) }
                 .map { b ->
                     val d = FloatArray(1)
                     Location.distanceBetween(loc.latitude, loc.longitude, b.lat, b.lon, d)
-                    NearB(b, d[0] / 1000.0, badgeFor(b))
+                    NearB(b, d[0] / 1000.0)
                 }
                 .filter { it.km <= radiusKm }
                 .sortedBy { it.km }
@@ -2908,7 +2962,6 @@ class MainActivity : Activity() {
                 // (Uncaught SyntaxError: Unexpected number).
                 .append(",km:").append(String.format(Locale.US, "%.1f", n.km))
                 .append(",kw:").append(String.format(Locale.US, "%.0f", n.b.kw))
-                .append(",badge:\"").append(escapeJs(n.badge ?: "")).append("\"")
                 .append(",nom:\"").append(escapeJs(
                     if (n.b.enseigne.isNotEmpty()) n.b.enseigne else n.b.nom)).append("\"")
                 .append(",adresse:\"").append(escapeJs(n.b.adresse)).append("\"}")
@@ -2940,7 +2993,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.23 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.24 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
@@ -3002,7 +3055,8 @@ class MainActivity : Activity() {
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
         val title = TextView(this)
-        title.text = "Bornes ≥ " + "%.0f".format(minKw) + " kW, " + arr.size + " affichées"
+        title.text = "Bornes ≥ " + "%.0f".format(minKw) + " kW" +
+            (operateur?.let { " - " + it } ?: "") + ", " + arr.size + " affichées"
         title.textSize = 17f
         title.typeface = Typeface.DEFAULT_BOLD
         title.setPadding(dp(14), dp(12), dp(14), dp(6))
@@ -3047,10 +3101,10 @@ padding:6px 8px;border:1px solid #888;border-radius:6px;font-size:12px}</style>
 // v0.15 : toute erreur JavaScript est remontée dans le journal de l'app.
 window.onerror = function(m) { Android.jsErr('' + m); return true; };
 var DATA = __DATA__;
-var COLORS = {
- "Ionity (Electroverse)":"#e01a1a","Electroverse":"#e01a1a","Electra":"#0057b8",
- "Chargemap":"#7b1fa2","Mobilize":"#00a19a","Atlante":"#f5a623",
- "Shell Recharge":"#fbd206","Plugsurfing":"#2e7d32"};
+// v0.24 : la couleur du point dépend de sa puissance (les anciennes
+// « cartes de recharge » ne coloraient que les points, sans filtrer).
+var TIERS = [["≥ 150 kW","#e01a1a"],["50 à 149 kW","#f5a623"],["22 à 49 kW","#7b1fa2"]];
+function colFor(kw) { return kw >= 150 ? TIERS[0][1] : (kw >= 50 ? TIERS[1][1] : TIERS[2][1]); }
 var map = L.map('map');
 // v0.15.9 : tuiles Esri World Street (sans clé) - CARTO affichait
 // « API KEY REQUIRED » (clé obligatoire) et le serveur OSM bloquait.
@@ -3058,16 +3112,13 @@ var base = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Wor
  {maxZoom:19, attribution:'&copy; Esri, OpenStreetMap'});
 base.addTo(map);
 var pts = [];
-var leg = {};
 DATA.forEach(function(d, i) {
-  var col = d.badge ? (COLORS[d.badge] || '#777777') : '#777777';
-  if (d.badge) leg[d.badge] = col;
+  var col = colFor(d.kw);
   var m = L.circleMarker([d.lat, d.lon],
     {radius:9, color:'#000', weight:1, fillColor:col, fillOpacity:0.95}).addTo(map);
   m.bindPopup(
     '<b>' + d.nom + '</b><br>' + d.kw + ' kW - à ' + d.km + ' km<br>' +
     '<small>' + d.adresse + '</small>' +
-    (d.badge ? '<br><b>Carte : ' + d.badge + '</b>' : '') +
     '<br><button style="margin-top:6px" onclick="Android.insertAt(' + i + ')">' +
     'Insérer comme étape</button>');
   pts.push([d.lat, d.lon]);
@@ -3086,8 +3137,8 @@ if (ME) {
 }
 var lg = document.getElementById('lg');
 var h = '';
-for (var k in leg) { h += '<div><span class="dot" style="background:' +
-  leg[k] + '"></span>' + k + '</div>'; }
+for (var t = 0; t < TIERS.length; t++) { h += '<div><span class="dot" style="background:' +
+  TIERS[t][1] + '"></span>' + TIERS[t][0] + '</div>'; }
 lg.innerHTML = h;
 if (pts.length) { map.fitBounds(pts, {padding: [25, 25]}); }
 else { map.setView([__LAT__, __LON__], 11); }
