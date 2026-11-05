@@ -322,7 +322,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.24 - non connecté"
+        statusTv.text = "MG4 Link v0.25 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -539,7 +539,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.24 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.25 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2099,7 +2099,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.24 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.25 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2120,7 +2120,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.24 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.25 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2314,11 +2314,19 @@ class MainActivity : Activity() {
             // (readText) faisait planter l'application par manque de mémoire.
             // On lit maintenant ligne par ligne : un seul bloc <INSTALACION>
             // (quelques ko) est en mémoire à la fois.
+            // v0.25 : le drapeau inBlock remplace le test « bloc non vide » -
+            // quand <INSTALACION> est seul sur sa ligne, le bloc capturé
+            // démarre VIDE et tout le contenu était perdu (15 points seulement
+            // au lieu de plusieurs milliers).
             val block = StringBuilder()
+            var inBlock = false
+            var nBlocks = 0
             fun flush() {
-                if (block.isNotEmpty()) {
+                if (inBlock) {
+                    nBlocks++
                     parseEsBlock(block.toString(), byPoint)
                     block.setLength(0)
+                    inBlock = false
                 }
             }
             java.io.BufferedReader(java.io.InputStreamReader(
@@ -2328,13 +2336,15 @@ class MainActivity : Activity() {
                     if (line.contains("<INSTALACION>")) {
                         flush()
                         block.append(line.substringAfter("<INSTALACION>"))
-                    } else if (block.isNotEmpty()) {
+                        inBlock = true
+                    } else if (inBlock) {
                         block.append('\n').append(line)
                     }
                     line = br.readLine()
                 }
             }
             flush()
+            log("Espagne : " + nBlocks + " blocs INSTALACION lus dans le fichier.")
             if (byPoint.isEmpty()) {
                 log("Fichier espagnol lu mais aucun point ≥ 22 kW trouvé.")
                 return 0
@@ -2362,8 +2372,10 @@ class MainActivity : Activity() {
             val m = Regex("<" + n + ">(.*?)</" + n + ">").find(block)
             return m?.groupValues?.get(1)?.trim() ?: ""
         }
-        val lat = tag("LATITUD").toDoubleOrNull() ?: return
-        val lon = tag("LONGITUD").toDoubleOrNull() ?: return
+        // v0.25 : tolère aussi bien « 41.6523 » que « 41,6523 » (virgule
+        // décimale espagnole) pour les coordonnées.
+        val lat = tag("LATITUD").replace(',', '.').toDoubleOrNull() ?: return
+        val lon = tag("LONGITUD").replace(',', '.').toDoubleOrNull() ?: return
         // « 350,00 kW » (virgule décimale espagnole).
         val kw = kwFromTag(tag("POTENCIAMAXIMA"))
         if (kw < 22.0) return
@@ -2993,7 +3005,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.24 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.25 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
