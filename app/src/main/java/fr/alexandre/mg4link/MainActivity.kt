@@ -322,7 +322,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.27 - non connecté"
+        statusTv.text = "MG4 Link v0.28 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -539,7 +539,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.27 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.28 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -588,8 +588,11 @@ class MainActivity : Activity() {
                         lastStage = idx
                         lastKm = -999.0
                     }
-                    val km = roadKm(Geo(loc.latitude, loc.longitude), Geo(st.lat, st.lon))
-                    if (km > 0 && Math.abs(km - lastKm) >= 1.0) {
+                    // v0.28 : seule une distance routière RÉELLE met à jour
+                    // le reste (les estimations à vol d'oiseau faisaient
+                    // sauter le compteur : 1,7 -> 4,8 -> 0,9 km).
+                    val km = tryRoadKm(Geo(loc.latitude, loc.longitude), Geo(st.lat, st.lon))
+                    if (km != null && km > 0 && Math.abs(km - lastKm) >= 1.0) {
                         remainKm = km
                         lastKm = km
                         log("Reste " + fmtKm(km) + " km par la route jusqu'à « " +
@@ -601,6 +604,12 @@ class MainActivity : Activity() {
                                 refreshRoute()
                                 refreshOverlay()
                             }
+                        }
+                    } else if (km == null) {
+                        // v0.28 : OSRM en panne - l'arrivée est quand même
+                        // détectée si on est physiquement proche de l'étape.
+                        if (distKm(loc.latitude, loc.longitude, st.lat, st.lon) <= 0.35) {
+                            handler.post { finishStage(false) }
                         }
                     }
                 }
@@ -729,8 +738,7 @@ class MainActivity : Activity() {
             refreshLive()
             // Suivi du trajet par GPS (v0.9) : fonctionne même si la lecture
             // OBD live est bloquée ou désactivée.
-            if (tripActive && stageIdx < stages.size &&
-                (tripKm - stageStartKm) >= stages[stageIdx].km) finishStage(false)
+            if (stageReached()) finishStage(false)
             refreshRoute()
             refreshOverlay()
         }
@@ -1101,8 +1109,7 @@ class MainActivity : Activity() {
                             }
                         }
                         refreshLive()
-                        if (tripActive && stageIdx < stages.size &&
-                            (tripKm - stageStartKm) >= stages[stageIdx].km) finishStage(false)
+                        if (stageReached()) finishStage(false)
                         if (socPct >= 0.0 && socPct <= 15.0 && !lowWarned) {
                             lowWarned = true
                             warnLow()
@@ -1279,23 +1286,37 @@ class MainActivity : Activity() {
      * Distance routière réelle entre deux points via OSRM (OpenStreetMap,
      * gratuit, sans clé). Repli : vol d'oiseau × 1,25 si le service ne répond pas.
      */
-    private fun roadKm(a: Geo, b: Geo): Double {
-        return try {
-            val url = "https://router.project-osrm.org/route/v1/driving/" +
-                fmtD(a.lon) + "," + fmtD(a.lat) + ";" + fmtD(b.lon) + "," + fmtD(b.lat) +
-                "?overview=false"
-            val json = httpGet(url, 15000)
-            val m = Regex("\"distance\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)").find(json)
-            if (m != null) {
-                m.groupValues[1].toDouble() / 1000.0
-            } else {
-                distKm(a.lat, a.lon, b.lat, b.lon) * 1.25
+    /**
+     * v0.28 : distance routière OSRM « réelle » - null si le service ne
+     * répond pas après 2 tentatives. Les appels critiques (recalcul au
+     * départ, reste à parcourir) n'écrasent jamais une valeur réelle par
+     * une estimation à vol d'oiseau.
+     */
+    private fun tryRoadKm(a: Geo, b: Geo): Double? {
+        var lastErr = "pas de réponse"
+        for (essai in 1..2) {
+            try {
+                val url = "https://router.project-osrm.org/route/v1/driving/" +
+                    fmtD(a.lon) + "," + fmtD(a.lat) + ";" + fmtD(b.lon) + "," + fmtD(b.lat) +
+                    "?overview=false"
+                val json = httpGet(url, 12000)
+                val m = Regex("\"distance\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)").find(json)
+                if (m != null) return m.groupValues[1].toDouble() / 1000.0
+                lastErr = "réponse illisible"
+            } catch (e: Exception) {
+                lastErr = e.message ?: "erreur"
             }
-        } catch (e: Exception) {
-            log("OSRM indisponible (" + e.message + ") : estimation vol d'oiseau.")
-            distKm(a.lat, a.lon, b.lat, b.lon) * 1.25
+            if (essai == 1) Thread.sleep(1000)
         }
+        log("OSRM indisponible (" + lastErr + ") : estimation à vol d'oiseau.")
+        return null
     }
+
+    /** Distance routière (OSRM) ; repli : vol d'oiseau × 1,35 si le service
+     * ne répond pas (les routes réelles font 20 à 50 % de plus que la
+     * ligne droite). */
+    private fun roadKm(a: Geo, b: Geo): Double =
+        tryRoadKm(a, b) ?: distKm(a.lat, a.lon, b.lat, b.lon) * 1.35
 
     private fun applyStages(list: List<Stage>, fails: List<String>) {
         stages.clear()
@@ -1545,10 +1566,18 @@ class MainActivity : Activity() {
             val fresh = here != null && here.time > 0L &&
                 System.currentTimeMillis() - here.time < 10L * 60 * 1000
             if (fresh) {
-                val d = roadKm(Geo(here!!.latitude, here!!.longitude), Geo(st0.lat, st0.lon))
-                if (d > 0.1 && (st0.km <= 0.1 || d < st0.km - 1.0 || d > st0.km + 1.0)) {
+                // v0.28 : on ne remplace la distance que par une valeur
+                // routière RÉELLE - avant, une estimation à vol d'oiseau
+                // (4,5 km) écrasait la vraie distance routière (6,8 km)
+                // et l'étape se terminait trop tôt.
+                val d = tryRoadKm(Geo(here!!.latitude, here!!.longitude), Geo(st0.lat, st0.lon))
+                if (d != null && d > 0.1 &&
+                    (st0.km <= 0.1 || Math.abs(d - st0.km) > 1.0)) {
                     stages[stageIdx] = Stage(st0.name, d, st0.lat, st0.lon)
-                    log("Distance recalculée : « " + st0.name + " » à " + fmtKm(d) + " km.")
+                    log("Distance routière recalculée : « " + st0.name + " » à " +
+                        fmtKm(d) + " km.")
+                } else if (d == null && st0.km <= 0.1) {
+                    log("OSRM indisponible : distance conservée, arrivée détectée par le GPS.")
                 }
             } else if (st0.km <= 0.1) {
                 log("Position GPS pas encore fixée : distance recalculée en roulant.")
@@ -1565,6 +1594,26 @@ class MainActivity : Activity() {
             return
         }
         if (stageIdx < stages.size) finishStage(true)
+    }
+
+    /**
+     * v0.28 : l'étape est-elle atteinte ? Pour une étape localisée, on est
+     * arrivé quand on est physiquement PROCHE de la destination (à 350 m à
+     * vol d'oiseau) ou que le reste routier réel est ≤ 1 km - pas seulement
+     * quand les km parcourus dépassent la distance planifiée (sous-estimée
+     * si OSRM était en panne au départ). Étape sans position : odomètre GPS.
+     */
+    private fun stageReached(): Boolean {
+        if (!tripActive || stageIdx >= stages.size) return false
+        val s = stages[stageIdx]
+        val loc = lastLoc
+        return if (s.hasPos && loc != null) {
+            val d = FloatArray(1)
+            Location.distanceBetween(loc.latitude, loc.longitude, s.lat, s.lon, d)
+            d[0] <= 350.0 || (remainKm >= 0.0 && remainKm <= 1.0)
+        } else {
+            (tripKm - stageStartKm) >= s.km
+        }
     }
 
     @Synchronized
@@ -2099,7 +2148,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.27 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.28 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2120,7 +2169,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.27 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.28 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -3050,7 +3099,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.27 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.28 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
