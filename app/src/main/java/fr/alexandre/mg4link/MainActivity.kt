@@ -128,7 +128,16 @@ class ElmLink {
             } else {
                 BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             }
-            if (!g.writeCharacteristic(c)) return "ERREUR : écriture refusée"
+            // v0.29 : Android refuse une écriture quand la précédente n'est
+            // pas encore terminée (GATT « busy », fréquent juste après une
+            // reconnexion). On retente jusqu'à 3 fois avec 250 ms d'écart
+            // avant d'abandonner.
+            var written = false
+            for (tryIdx in 1..3) {
+                if (g.writeCharacteristic(c)) { written = true; break }
+                Thread.sleep(250)
+            }
+            if (!written) return "ERREUR : écriture refusée"
             off = end
             Thread.sleep(30)
         }
@@ -322,7 +331,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.28 - non connecté"
+        statusTv.text = "MG4 Link v0.29 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -539,7 +548,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.28 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.29 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -979,24 +988,55 @@ class MainActivity : Activity() {
 
     // --------------------------------------------------------------- ELM327
 
-    private fun initElm() {
+    /** v0.29 : une réponse est-elle en échec (écriture refusée ou délai
+     * dépassé) ? Avant, ces échecs passaient inaperçus et l'app affichait
+     * « Initialisation terminée » alors que le dongle était muet. */
+    private fun elmFailed(r: String): Boolean =
+        r.startsWith("ERREUR") || r.contains("[délai dépassé]")
+
+    private fun initElm(retried: Boolean = false) {
         try {
             status("Initialisation du dongle...")
+            var failed = 0
             for (cmd in listOf("ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATSP0")) {
                 val r = elm.request(cmd, if (cmd == "ATZ") 5000L else 3000L)
                 log("> $cmd\n$r")
+                if (elmFailed(r)) failed++
             }
-            log("> ATRV\n" + elm.request("ATRV", 3000))
-            log("> 0100 (détection du protocole, peut durer quelques secondes)\n" + elm.request("0100", 12000))
-            log("> ATDP\n" + elm.request("ATDP", 3000))
+            var r = elm.request("ATRV", 3000)
+            log("> ATRV\n$r")
+            if (elmFailed(r)) failed++
+            r = elm.request("0100", 12000)
+            log("> 0100 (détection du protocole, peut durer quelques secondes)\n$r")
+            if (elmFailed(r)) failed++
+            r = elm.request("ATDP", 3000)
+            log("> ATDP\n$r")
+            if (elmFailed(r)) failed++
+            if (failed > 0 && !retried) {
+                // v0.29 : une seule seconde tentative complète - le refus
+                // d'écriture du vLinker arrive souvent juste après le branchement
+                // ou une reconnexion, puis disparaît.
+                log("Initialisation : $failed commande(s) en échec, nouvelle tentative dans 1 s...")
+                Thread.sleep(1000)
+                initElm(true)
+                return
+            }
             ready = true
             // v0.12 : la lecture live démarre ou REdémarre dès que le dongle est prêt,
             // même si l'interrupteur était déjà sur ON (cas de la reconnexion après
             // une déconnexion : avant, rien ne relançait la lecture).
             if (liveSwitch.isChecked) setLive(true)
             else handler.post { liveSwitch.isChecked = true }
-            status("Prêt - dongle connecté")
-            log("Initialisation terminée.")
+            if (failed == 0) {
+                status("Prêt - dongle connecté")
+                log("Initialisation terminée.")
+            } else {
+                // v0.29 : plus de faux « Initialisation terminée » si des
+                // commandes ont échoué même après la seconde tentative.
+                ready = false
+                status("Initialisation en échec")
+                log("Initialisation en échec ($failed commande(s) sans réponse) : touchez à nouveau « Scanner et connecter ».")
+            }
         } catch (e: Exception) {
             log("Erreur d'initialisation : ${e.message}")
         }
@@ -2148,7 +2188,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.28 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.29 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2169,7 +2209,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.28 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.29 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -3099,7 +3139,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.28 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.29 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
