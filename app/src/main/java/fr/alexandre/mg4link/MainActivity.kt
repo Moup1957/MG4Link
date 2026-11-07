@@ -331,7 +331,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.30 - non connecté"
+        statusTv.text = "MG4 Link v0.31 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -548,7 +548,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.30 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.31 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2188,7 +2188,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.30 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.31 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2209,7 +2209,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.30 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.31 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2847,6 +2847,12 @@ class MainActivity : Activity() {
                 }
                 .filter { it.km <= radiusKm }
                 .sortedBy { it.km }
+                // v0.31 : les bases IRVE/MITECO contiennent une fiche par
+                // CONNECTEUR - une station de 10 connecteurs apparaissait donc
+                // 10 fois dans la liste. On ne garde que la plus proche par
+                // station (même enseigne + même adresse).
+                .distinctBy { it.b.enseigne.trim().lowercase() + "|" +
+                    it.b.adresse.trim().lowercase() }
                 .take(50)
         }
         if (arr.isEmpty()) {
@@ -3167,6 +3173,11 @@ class MainActivity : Activity() {
                 }
                 .filter { it.km <= radiusKm }
                 .sortedBy { it.km }
+                // v0.31 : idem listBornes - une seule pastille par station
+                // sur la carte (un marqueur par connecteur superposait 10
+                // points au même endroit).
+                .distinctBy { it.b.enseigne.trim().lowercase() + "|" +
+                    it.b.adresse.trim().lowercase() }
                 .take(150)
         }
         if (arr.isEmpty()) {
@@ -3217,7 +3228,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.30 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.31 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
