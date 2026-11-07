@@ -331,7 +331,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.33 - non connecté"
+        statusTv.text = "MG4 Link v0.34 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -548,7 +548,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.33 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.34 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2188,7 +2188,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.33 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.34 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2209,7 +2209,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.33 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.34 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2938,8 +2938,15 @@ class MainActivity : Activity() {
                 (stages[stageIdx].km - (tripKm - stageStartKm)) + km
             else -> km
         }
-        stages.add(stageIdx.coerceAtMost(stages.size), Stage(name, stageKm, b.lat, b.lon))
-        log("Borne insérée comme étape " + (stageIdx + 1) + " : " + name +
+        // v0.34 : pendant un trajet, la borne devient la prochaine étape
+        // (comme avant). HORS trajet, elle s'ajoute à la FIN de l'itinéraire :
+        // avant elle était toujours insérée en tête (étape 1), donc deux
+        // bornes choisies Valladolid puis Bragança se retrouvaient dans
+        // l'ordre inverse (Bragança avant Valladolid) et Google Maps
+        // construisait un itinéraire aberrant.
+        val pos = if (tripActive) stageIdx.coerceAtMost(stages.size) else stages.size
+        stages.add(pos, Stage(name, stageKm, b.lat, b.lon))
+        log("Borne insérée comme étape " + (pos + 1) + " : " + name +
             " (" + fmtKm(stageKm) + " km, distance routière).")
         refreshRoute()
     }
@@ -3250,7 +3257,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.33 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.34 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
