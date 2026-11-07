@@ -331,7 +331,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.32 - non connecté"
+        statusTv.text = "MG4 Link v0.33 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -548,7 +548,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.32 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.33 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2188,7 +2188,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.32 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.33 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2209,7 +2209,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.32 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.33 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2881,31 +2881,50 @@ class MainActivity : Activity() {
     }
 
     private fun borneAction(b: Borne, km: Double) {
-        val opts = arrayOf("Insérer comme prochaine étape", "Ouvrir dans Google Maps")
-        AlertDialog.Builder(this)
-            .setTitle(b.enseigne)
-            .setMessage(
-                "Adresse : " + b.adresse + "\n" +
-                    "Puissance max : " + "%.0f".format(b.kw) + " kW\n" +
-                    "Distance : " + "%.1f".format(km) + " km (à vol d'oiseau)"
-            )
-            .setItems(opts) { _, which ->
-                when (which) {
-                    0 -> insertBorne(b, km)
-                    1 -> try {
-                        startActivity(
-                            Intent(
-                                Intent.ACTION_VIEW,
-                                Uri.parse("https://www.google.com/maps/search/?api=1&query=" + b.lat + "," + b.lon)
-                            )
-                        )
-                    } catch (e: Exception) {
-                        log("Maps indisponible : " + e.message)
-                    }
-                }
+        // v0.33 : les deux actions étaient de simples lignes de texte sous
+        // l'adresse (setItems) et passaient inaperçues - elles sont
+        // maintenant de vrais boutons bien visibles.
+        var dlgRef: android.app.Dialog? = null
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        val tv = TextView(this)
+        tv.text = "Adresse : " + b.adresse + "\n" +
+            "Puissance max : " + "%.0f".format(b.kw) + " kW\n" +
+            "Distance : " + "%.1f".format(km) + " km (à vol d'oiseau)"
+        tv.setPadding(dp(18), dp(14), dp(18), dp(6))
+        box.addView(tv)
+        val ins = Button(this)
+        ins.text = "Insérer dans l'itinéraire"
+        ins.isAllCaps = false
+        ins.setOnClickListener {
+            insertBorne(b, km)
+            dlgRef?.dismiss()
+        }
+        box.addView(ins)
+        val gmaps = Button(this)
+        gmaps.text = "Ouvrir dans Google Maps"
+        gmaps.isAllCaps = false
+        gmaps.setOnClickListener {
+            try {
+                startActivity(
+                    Intent(
+                        Intent.ACTION_VIEW,
+                        Uri.parse("https://www.google.com/maps/search/?api=1&query=" + b.lat + "," + b.lon)
+                    )
+                )
+            } catch (e: Exception) {
+                log("Maps indisponible : " + e.message)
             }
-            .setNegativeButton("Annuler", null)
-            .show()
+            dlgRef?.dismiss()
+        }
+        box.addView(gmaps)
+        val dlg = AlertDialog.Builder(this)
+            .setTitle(b.enseigne)
+            .setView(box)
+            .setNegativeButton("Fermer", null)
+            .create()
+        dlgRef = dlg
+        dlg.show()
     }
 
     private fun insertBorne(b: Borne, km: Double) {
@@ -3231,7 +3250,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.32 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.33 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
