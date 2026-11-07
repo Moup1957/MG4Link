@@ -331,7 +331,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.29 - non connecté"
+        statusTv.text = "MG4 Link v0.30 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -548,7 +548,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.29 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.30 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2188,7 +2188,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.29 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.30 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2209,7 +2209,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.29 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.30 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -2671,6 +2671,58 @@ class MainActivity : Activity() {
         return Borne(lat, lon, kw, enseigne, name, if (adr.isNotEmpty()) adr else name)
     }
 
+    /** v0.30 : saisie libre d'un lieu (ville, adresse, code postal)
+     * puis géocodage OpenStreetMap avec confirmation (homonymes possibles,
+     * ex : Gorges 44 vs Gorges dans l'Oise). Retrouve la recherche de bornes
+     * autour d'une VILLE, perdue depuis que l'étape courante est proposée. */
+    private fun choosePlace(then: (Location, String) -> Unit) {
+        val et = EditText(this)
+        et.hint = "Ex : Gorges 44, Valladolid, Super U 44190 Gétigné…"
+        et.setSingleLine()
+        AlertDialog.Builder(this)
+            .setTitle("Autour de quel lieu ?")
+            .setMessage("Saisissez un lieu, idéalement avec son code postal ou " +
+                "son département (ex : Gorges 44) :")
+            .setView(et)
+            .setPositiveButton("Rechercher") { _, _ ->
+                val q = et.text.toString().trim()
+                if (q.isEmpty()) return@setPositiveButton
+                status("Recherche du lieu…")
+                thread(name = "geocode-borne") {
+                    val gf = geocodeFull(q)
+                    handler.post {
+                        status("")
+                        if (gf == null) {
+                            log("Lieu introuvable : « " + q + " ».")
+                            alert("Lieu introuvable",
+                                "OpenStreetMap n'a pas trouvé « " + q + " ».")
+                        } else {
+                            val g = gf.first
+                            val nom = gf.second
+                            log("« " + q + " » localisé → " +
+                                String.format(Locale.US, "%.3f, %.3f", g.lat, g.lon) +
+                                " (" + nom + ")")
+                            val c = Location("lieu")
+                            c.latitude = g.lat
+                            c.longitude = g.lon
+                            AlertDialog.Builder(this)
+                                .setTitle("C'est bien ce lieu ?")
+                                .setMessage(nom + "\n\n" +
+                                    String.format(Locale.US, "%.3f, %.3f", g.lat, g.lon) +
+                                    "\n\nContinuer avec ce lieu ?")
+                                .setPositiveButton("Continuer") { _, _ ->
+                                    then(c, "autour de « " + q.take(30) + " »")
+                                }
+                                .setNegativeButton("Annuler", null)
+                                .show()
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
     private fun showBornes() {
         if (bornes.isEmpty()) {
             if (!bornesLoading) {
@@ -2741,11 +2793,15 @@ class MainActivity : Activity() {
             if (here != null) opts.add("Autour de ma position")
             opts.add("Autour de « " + nextStage.name.take(30) + " » (étape " +
                 ((if (tripActive) stageIdx else 0) + 1) + ")")
+            // v0.30 : retour de la recherche autour d'une ville saisie.
+            opts.add("Autour d'un lieu (ville, code postal…)")
             AlertDialog.Builder(this)
                 .setTitle("Bornes autour de quoi ?")
                 .setItems(opts.toTypedArray()) { _, i ->
                     if (i == 0 && here != null) {
                         chooseRadius(here, "autour de moi")
+                    } else if (i == opts.size - 1) {
+                        choosePlace { c, l -> chooseRadius(c, l) }
                     } else {
                         val c = Location("stage")
                         c.latitude = nextStage.lat
@@ -2764,7 +2820,16 @@ class MainActivity : Activity() {
                     "Sortez dehors ou attendez la fixation GPS, puis retouchez « Bornes recharge ».")
                 return
             }
-            chooseRadius(loc, "autour de moi")
+            // v0.30 : même sans étape, on peut chercher autour d'une ville.
+            AlertDialog.Builder(this)
+                .setTitle("Bornes autour de quoi ?")
+                .setItems(arrayOf("Autour de ma position",
+                    "Autour d'un lieu (ville, code postal…)")) { _, i ->
+                    if (i == 0) chooseRadius(loc, "autour de moi")
+                    else choosePlace { c, l -> chooseRadius(c, l) }
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
         }
     }
 
@@ -3004,11 +3069,15 @@ class MainActivity : Activity() {
             val opts = ArrayList<String>()
             if (here != null) opts.add("Autour de ma position")
             opts.add("Autour de « " + nextStage.name.take(30) + " »")
+            // v0.30 : retour de la recherche autour d'une ville saisie.
+            opts.add("Autour d'un lieu (ville, code postal…)")
             AlertDialog.Builder(this)
                 .setTitle("Bornes autour de quoi ?")
                 .setItems(opts.toTypedArray()) { _, i ->
                     if (i == 0 && here != null) {
                         pickRadius(here, "autour de moi")
+                    } else if (i == opts.size - 1) {
+                        choosePlace { c, l -> pickRadius(c, l) }
                     } else {
                         val c = Location("stage")
                         c.latitude = nextStage.lat
@@ -3019,7 +3088,16 @@ class MainActivity : Activity() {
                 .setNegativeButton("Annuler", null)
                 .show()
         } else if (here != null) {
-            pickRadius(here, "autour de moi")
+            // v0.30 : même sans étape, on peut chercher autour d'une ville.
+            AlertDialog.Builder(this)
+                .setTitle("Bornes autour de quoi ?")
+                .setItems(arrayOf("Autour de ma position",
+                    "Autour d'un lieu (ville, code postal…)")) { _, i ->
+                    if (i == 0) pickRadius(here, "autour de moi")
+                    else choosePlace { c, l -> pickRadius(c, l) }
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
         } else {
             // v0.15.1 : sans position et sans étape localisée, on propose de
             // saisir un lieu (ville, adresse) recherché sur OpenStreetMap.
@@ -3139,7 +3217,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.29 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.30 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
