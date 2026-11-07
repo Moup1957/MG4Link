@@ -334,7 +334,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.35 - non connecté"
+        statusTv.text = "MG4 Link v0.36 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -551,7 +551,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.35 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.36 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -629,7 +629,10 @@ class MainActivity : Activity() {
         }
         if (hasAll()) startGps()
         ensureStorageAccess()
-        thread(name = "bornes-cache") { loadBornesCache() }
+        thread(name = "bornes-cache") {
+            restoreConsoPublic()
+            loadBornesCache()
+        }
     }
 
     override fun onDestroy() {
@@ -1394,6 +1397,11 @@ class MainActivity : Activity() {
         stages.addAll(list)
         tripActive = false
         stageIdx = 0
+        // v0.36 : le reste-à-parcourir du TRAJET PRÉCÉDENT ne doit pas
+        // survivre au nouvel itinéraire - sinon (reste 0,7 km d'un ancien
+        // trajet) la nouvelle étape était validée instantanément (« atteinte :
+        // 0,0 km parcourus »).
+        remainKm = -1.0
         log("Itinéraire : " + stages.size + " étape(s), total " +
             fmtKm(stages.sumOf { it.km }) + " km" +
             (if (fails.isNotEmpty()) " (" + fails.size + " adresse(s) ignorée(s))" else ""))
@@ -1509,6 +1517,7 @@ class MainActivity : Activity() {
                     }
                     tripActive = false
                     stageIdx = 0
+                    remainKm = -1.0 // v0.36 : reste obsolète de l'ancien trajet
                     log("Itinéraire « " + names[i] + " » chargé (" + stages.size + " étapes, total " +
                         "%.0f".format(stages.sumOf { it.km }) + " km).")
                     refreshRoute()
@@ -1525,6 +1534,35 @@ class MainActivity : Activity() {
         getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
             .putFloat("conso", consoPctPerKm.toFloat())
             .apply()
+        // v0.36 : copie silencieuse dans Download/MG4Link - les préférences
+        // internes sont EFFACÉES à chaque désinstallation (APK non signé =
+        // désinstallation obligatoire), l'expérience acquise était donc
+        // perdue à chaque mise à jour. Ce fichier, lui, survit.
+        try {
+            if (android.os.Environment.isExternalStorageManager()) {
+                val dir = publicDir()
+                dir.mkdirs()
+                File(dir, "conso.txt").writeText("%.4f".format(consoPctPerKm))
+            }
+        } catch (e: Exception) { }
+    }
+
+    /** v0.36 : après une réinstallation, relit la conso sauvegardée dans
+     * Download/MG4Link (préférences internes vides). */
+    private fun restoreConsoPublic() {
+        try {
+            val sp = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+            if (sp.getFloat("conso", 0f) > 0f) return
+            val v = loadPublicCache("conso.txt")?.trim()
+                ?.replace(',', '.')?.toDoubleOrNull() ?: return
+            if (v > 0.05 && v < 2.0) {
+                consoPctPerKm = v
+                log("Calibrage récupéré depuis Download/MG4Link : " +
+                    "%.3f".format(v) + " %/km (autonomie à 100 % : " +
+                    "%.0f".format(100.0 / v) + " km)")
+                persistConso()
+            }
+        } catch (e: Exception) { }
     }
 
     /** Calibrage manuel : autonomie réelle à 100 % → consommation %/km (v0.7.2). */
@@ -1707,6 +1745,7 @@ class MainActivity : Activity() {
         stageIdx++
         stageStartKm = tripKm
         stageStartSoc = sc
+        remainKm = -1.0 // v0.36 : sera recalculé pour la prochaine étape
         if (stageIdx >= stages.size) {
             tripActive = false
             log("Itinéraire terminé !")
@@ -2219,7 +2258,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.35 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.36 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2240,7 +2279,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.35 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.36 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -3288,7 +3327,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.35 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.36 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
