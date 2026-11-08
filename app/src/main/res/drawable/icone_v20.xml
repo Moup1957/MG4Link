@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- v0.37 : version vectorielle de l'illustration "petite voiture bleue
+         aux jumelles" - ciel, soleil, prairie verte, voiture souriante. -->
+    <!-- ciel -->
+    <path android:fillColor="#BBDEFB"
+        android:pathData="M0,0h108v108h-108z" />
+    <!-- soleil -->
+    <path android:fillColor="#FFD54F"
+        android:pathData="M92,18m-8,0a8,8 0 1 0 16,0a8,8 0 1 0 -16,0" />
+    <!-- prairie -->
+    <path android:fillColor="#66BB6A"
+        android:pathData="M0,78h108v30h-108z" />
+    <!-- colline -->
+    <path android:fillColor="#4CAF50"
+        android:pathData="M0,78q27,-12 54,0t54,0v30h-108z" />
+    <!-- carrosserie bleue -->
+    <path android:fillColor="#1976D2"
+        android:pathData="M20,62c0,-8 4,-12 12,-14l6,-12c2,-4 5,-6 9,-6h14c4,0 7,2 9,6l6,12c8,2 12,6 12,14v6c0,3 -2,5 -5,5h-6c-3,0 -5,-2 -5,-5v-3h-26v3c0,3 -2,5 -5,5h-6c-3,0 -5,-2 -5,-5z" />
+    <!-- pare-brise -->
+    <path android:fillColor="#E3F2FD"
+        android:pathData="M42,40h13c2,0 4,1 5,3l5,9h-33l5,-9c1,-2 3,-3 5,-3z" />
+    <!-- jumelles : deux oculaires gris autour des yeux + pont central -->
+    <path android:fillColor="#455A64"
+        android:pathData="M41,52m-8,0a8,8 0 1 0 16,0a8,8 0 1 0 -16,0" />
+    <path android:fillColor="#455A64"
+        android:pathData="M60,52m-8,0a8,8 0 1 0 16,0a8,8 0 1 0 -16,0" />
+    <path android:fillColor="#455A64"
+        android:pathData="M47,50h7v4h-7z" />
+    <!-- yeux blancs + pupilles -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M41,52m-5,0a5,5 0 1 0 10,0a5,5 0 1 0 -10,0" />
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M60,52m-5,0a5,5 0 1 0 10,0a5,5 0 1 0 -10,0" />
+    <path android:fillColor="#263238"
+        android:pathData="M41,53m-2,0a2,2 0 1 0 4,0a2,2 0 1 0 -4,0" />
+    <path android:fillColor="#263238"
+        android:pathData="M60,53m-2,0a2,2 0 1 0 4,0a2,2 0 1 0 -4,0" />
+    <!-- sourire -->
+    <path android:fillColor="#263238"
+        android:pathData="M48,58q5,4 10,0l-1,2q-4,3 -8,0z" />
+    <!-- roues -->
+    <path android:fillColor="#37474F"
+        android:pathData="M34,72m-6,0a6,6 0 1 0 12,0a6,6 0 1 0 -12,0" />
+    <path android:fillColor="#37474F"
+        android:pathData="M74,72m-6,0a6,6 0 1 0 12,0a6,6 0 1 0 -12,0" />
+</vector>
