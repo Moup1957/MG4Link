@@ -236,6 +236,11 @@ class MainActivity : Activity() {
     @Volatile
     private var remainKm = -1.0
 
+    // v0.38 : SOH mesuré (bouton « SOH batterie… »), affiché dans la
+    // fenêtre flottante tant qu'il est connu.
+    @Volatile
+    private var sohPct = -1.0
+
     // Apprentissage continu (v0.7.2)
     @Volatile
     private var learnKm = 0.0
@@ -334,7 +339,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.36 - non connecté"
+        statusTv.text = "MG4 Link v0.38 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -432,6 +437,8 @@ class MainActivity : Activity() {
                 makeButton("Tests batterie") { testsBatterie() }
             )
         )
+        // v0.37 : santé de la batterie (SOH) lue dans le BMS.
+        secConn.addView(row(makeButton("SOH batterie…") { readSoh() }))
         secConn.addView(liveSwitch)
 
         secConn.addView(row(makeButton("Charge affichée…") { askSoc() }))
@@ -551,7 +558,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.36 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.38 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -1208,6 +1215,62 @@ class MainActivity : Activity() {
                 log("> $c\n" + elm.request(c, 8000))
             }
             log("Tests de base terminés.")
+        }
+    }
+
+    /** v0.37 : SOH (santé) de la batterie via le PID UDS 22B061 - celui
+     * qu'utilise ABRP sur MG4 (identifié sur MG ZS/MG5 puis confirmé par la
+     * communauté MG4). On interroge le calculateur batterie en adressage
+     * physique (7E4, réponse 7EC - repli 7E6/7EE), puis on RESTAURE
+     * l'adressage fonctionnel normal (7DF) pour ne pas casser la lecture
+     * live. Valeur = 2 octets / 100 (ex : 0x2710 = 10000 -> 100,0 %). */
+    private fun readSoh() {
+        if (!ready) {
+            log("Dongle pas prêt : connectez-vous d'abord.")
+            return
+        }
+        thread(name = "soh") {
+            var found = false
+            for ((req, resp) in listOf("7E4" to "7EC", "7E6" to "7EE")) {
+                log("SOH : interrogation du calculateur batterie (" + req + ")...")
+                elm.request("ATSH " + req, 3000)
+                elm.request("ATCRA " + resp, 3000)
+                val r = elm.request("22B061", 6000)
+                log("> 22B061 (" + req + ")\n" + r)
+                // Restauration de l'adressage normal AVANT d'analyser,
+                // même si la réponse est illisible.
+                elm.request("ATCRA", 3000)
+                elm.request("ATSH 7DF", 3000)
+                val m = Regex("62B061([0-9A-Fa-f]{4})")
+                    .find(r.replace(" ", "").uppercase(Locale.ROOT))
+                if (m != null) {
+                    val v = Integer.parseInt(m.groupValues[1], 16) / 100.0
+                    if (v > 40.0 && v <= 105.0) {
+                        val degr = 100.0 - v
+                        log("SOH batterie : " + String.format(Locale.US, "%.1f", v) +
+                            " % (dégradation estimée : " +
+                            String.format(Locale.US, "%.1f", degr) + " %).")
+                        // v0.38 : mémorisé pour la fenêtre flottante.
+                        sohPct = v
+                        refreshOverlay()
+                        alert("Santé de la batterie (SOH)",
+                            "SOH : " + String.format(Locale.US, "%.1f", v) + " %\n" +
+                                "Dégradation estimée : " +
+                                String.format(Locale.US, "%.1f", degr) + " %\n\n" +
+                                "(PID 22B061, même valeur qu'ABRP : estimation du BMS, " +
+                                "pas un test de capacité en laboratoire.)")
+                        found = true
+                        break
+                    }
+                }
+            }
+            if (!found) {
+                log("SOH : aucune réponse exploitable du calculateur batterie (22B061).")
+                alert("SOH introuvable",
+                    "Le calculateur batterie n'a pas répondu au PID 22B061.\n\n" +
+                        "Réessayez contact mis (bouton Start sans appuyer sur la pédale), " +
+                        "voiture non branchée.")
+            }
         }
     }
 
@@ -1950,6 +2013,12 @@ class MainActivity : Activity() {
             if (stages.isNotEmpty()) sb.append('\n').append("trajet non démarré")
         }
         sb.append('\n').append("%.2f".format(consoPctPerKm)).append(" %/km")
+        // v0.38 : santé de la batterie, affichée dès qu'elle a été lue
+        // une fois avec le bouton « SOH batterie… ».
+        if (sohPct > 0) {
+            sb.append('\n').append("SOH ").append(String.format(Locale.US, "%.1f", sohPct))
+                .append(" %")
+        }
         val txt = sb.toString()
         handler.post { tv.text = txt }
     }
@@ -2258,7 +2327,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.36 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.38 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2279,7 +2348,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.36 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.38 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -3327,7 +3396,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.36 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.38 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
