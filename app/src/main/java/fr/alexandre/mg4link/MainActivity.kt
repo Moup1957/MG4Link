@@ -1231,7 +1231,11 @@ class MainActivity : Activity() {
         }
         thread(name = "soh") {
             var found = false
-            for ((req, resp) in listOf("7E4" to "7EC", "7E6" to "7EE")) {
+            // v0.39 : la vraie combinaison MG4 (dépôt officiel OBDb/MG-MG4) :
+            // la requête 22B061 part sur l'adressage FONCTIONNEL 7DF et le
+            // BMS répond sur 7ED (pas 7E4 comme sur les ZS/MG5 - c'est ce qui
+            // donnait « NO DATA »). On garde 7E4/7E6 en repli au cas où.
+            for ((req, resp) in listOf("7DF" to "7ED", "7E4" to "7EC", "7E6" to "7EE")) {
                 log("SOH : interrogation du calculateur batterie (" + req + ")...")
                 elm.request("ATSH " + req, 3000)
                 elm.request("ATCRA " + resp, 3000)
