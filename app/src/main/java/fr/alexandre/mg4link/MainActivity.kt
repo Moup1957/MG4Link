@@ -26,6 +26,8 @@ import android.graphics.drawable.LayerDrawable
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -91,6 +93,10 @@ class Geo(val lat: Double, val lon: Double)
 
 /** Borne de recharge issue de la base IRVE. */
 class Borne(val lat: Double, val lon: Double, val kw: Double, val enseigne: String, val nom: String, val adresse: String)
+
+/** v0.41 : radar / zone de danger (fichier « Zones de danger Europe CSV »
+ * de lufop.net, placé dans Download/MG4Link/radars.csv). */
+class Radar(val lat: Double, val lon: Double, val name: String, val speed: Int)
 
 /**
  * Lien série ELM327 au-dessus d'une caractéristique BLE :
@@ -273,6 +279,17 @@ class MainActivity : Activity() {
     @Volatile
     private var bornesLoading = false
 
+    // v0.41 : radars / zones de danger (lufop.net, Download/MG4Link/radars.csv)
+    private val radars = ArrayList<Radar>()
+    @Volatile
+    private var radarInfo = "" // ligne « ⚠ RADAR … » affichée dans la fenêtre flottante
+    @Volatile
+    private var lastRadarKey = ""
+    @Volatile
+    private var lastRadarLevel = 0
+    @Volatile
+    private var lastRadarCheck = 0L
+
     // ------------------------------------------------------------------ UI
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -339,7 +356,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.40 - non connecté"
+        statusTv.text = "MG4 Link v0.41 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -558,7 +575,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.40 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.41 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -639,6 +656,7 @@ class MainActivity : Activity() {
         thread(name = "bornes-cache") {
             restoreConsoPublic()
             loadBornesCache()
+            loadRadars()
         }
     }
 
@@ -770,6 +788,8 @@ class MainActivity : Activity() {
             if (stageReached()) finishStage(false)
             refreshRoute()
             refreshOverlay()
+            // v0.41 : alertes radars / zones de danger (5 km puis 2 km).
+            checkRadars(loc)
         }
 
         override fun onProviderEnabled(provider: String) {}
@@ -2019,6 +2039,10 @@ class MainActivity : Activity() {
         sb.append('\n').append("%.2f".format(consoPctPerKm)).append(" %/km")
         // v0.38 : santé de la batterie, affichée dès qu'elle a été lue
         // une fois avec le bouton « SOH batterie… ».
+        // v0.41 : alerte radar en cours (⚠ + distance), au-dessus du SOH.
+        if (radarInfo.isNotEmpty()) {
+            sb.append('\n').append(radarInfo)
+        }
         if (sohPct > 0) {
             sb.append('\n').append("SOH ").append(String.format(Locale.US, "%.1f", sohPct))
                 .append(" %")
@@ -2198,6 +2222,127 @@ class MainActivity : Activity() {
         return if (d == 0L) Long.MAX_VALUE else System.currentTimeMillis() - d
     }
 
+    /** v0.41 : charge les radars depuis Download/MG4Link/radars.csv.
+     * Format lufop.net « Zones de danger Europe CSV » : lignes du type
+     * « longitude;latitude;nom;type;vitesse » (l'ordre lon/lat est
+     * détecté automatiquement, séparateur ; ou , accepté). */
+    private fun loadRadars() {
+        val dir = publicDir()
+        var f: File? = null
+        for (n in listOf("radars.csv", "radars.txt", "radars_lufop.csv")) {
+            val c = File(dir, n)
+            if (c.isFile && c.canRead()) { f = c; break }
+        }
+        if (f == null) {
+            log("Radars : aucun fichier radars.csv dans Download/MG4Link. " +
+                "Téléchargez « Zones de danger Europe CSV » sur lufop.net " +
+                "(inscription gratuite), puis renommez-le radars.csv dans " +
+                "Download/MG4Link.")
+            return
+        }
+        try {
+            class Row(val a: Double, val b: Double, val name: String, val speed: Int)
+            val rows = ArrayList<Row>()
+            var lonFirst = 0
+            var latFirst = 0
+            f.forEachLine { line ->
+                val p = line.split(';', ',').map { it.trim() }
+                if (p.size < 2) return@forEachLine
+                val a = p[0].replace(',', '.').toDoubleOrNull() ?: return@forEachLine
+                val b = p[1].replace(',', '.').toDoubleOrNull() ?: return@forEachLine
+                // Vote sur l'ordre des colonnes : en FR/ES/PT, la latitude
+                // est entre 35 et 55 et la longitude entre -10 et 10 environ.
+                if (a in 35.0..55.0 && b in -10.0..10.0) latFirst++
+                if (b in 35.0..55.0 && a in -10.0..10.0) lonFirst++
+                val name = p.firstOrNull {
+                    it.toDoubleOrNull() == null && it.isNotEmpty()
+                } ?: "Radar"
+                val speed = p.mapNotNull { s -> s.toDoubleOrNull()?.toInt() }
+                    .lastOrNull { it in 10..200 } ?: 0
+                rows.add(Row(a, b, name, speed))
+            }
+            if (rows.isEmpty()) {
+                log("Radars : « " + f.name + " » ne contient aucune ligne exploitable.")
+                return
+            }
+            val lonEnPremier = lonFirst >= latFirst
+            val lst = ArrayList<Radar>()
+            for (r in rows) {
+                val lat = if (lonEnPremier) r.b else r.a
+                val lon = if (lonEnPremier) r.a else r.b
+                // Filtre de sécurité : on ne garde que des coordonnées
+                // plausibles (France, Espagne, Portugal et environs).
+                if (lat in 34.0..56.0 && lon in -11.0..17.0) {
+                    lst.add(Radar(lat, lon, r.name, r.speed))
+                }
+            }
+            synchronized(radars) {
+                radars.clear()
+                radars.addAll(lst)
+            }
+            log("Radars chargés : " + lst.size + " points depuis « " + f.name +
+                " » (" + (f.length() / 1024) + " Ko). Alertes à 5 km puis 2 km.")
+        } catch (e: Exception) {
+            log("Radars : fichier illisible (" + e.message + ").")
+        }
+    }
+
+    /** v0.41 : alerte radar - bip + ligne « ⚠ » dans la fenêtre flottante,
+     * à 5 km puis 2 km avant le radar / zone le plus proche. */
+    private fun checkRadars(loc: Location) {
+        val now = System.currentTimeMillis()
+        if (now - lastRadarCheck < 2000L) return
+        lastRadarCheck = now
+        val lst = synchronized(radars) { radars }
+        if (lst.isEmpty()) { radarInfo = ""; return }
+        var best: Radar? = null
+        var bestD = Double.MAX_VALUE
+        for (r in lst) {
+            val d = distKm(loc.latitude, loc.longitude, r.lat, r.lon)
+            if (d < bestD) { bestD = d; best = r }
+        }
+        val r = best ?: return
+        val key = r.lat.toString() + "," + r.lon.toString()
+        if (key != lastRadarKey || bestD > 5.5) {
+            lastRadarKey = key
+            lastRadarLevel = 0
+        }
+        val level = when {
+            bestD <= 2.0 -> 2
+            bestD <= 5.0 -> 1
+            else -> 0
+        }
+        if (level == 0) {
+            radarInfo = ""
+            return
+        }
+        val limite = if (r.speed > 0) " (limite " + r.speed + " km/h)" else ""
+        val dist = if (level == 2) "%.1f".format(bestD) + " km" else "%.0f".format(bestD) + " km"
+        radarInfo = "⚠ RADAR " + r.name + limite + " - " + dist
+        if (level > lastRadarLevel) {
+            lastRadarLevel = level
+            log(radarInfo)
+            beep(level == 2)
+            refreshOverlay()
+        }
+    }
+
+    /** v0.41 : bip court (double bip pour l'alerte 2 km). */
+    private fun beep(double: Boolean) {
+        thread(name = "bip-radar") {
+            try {
+                val tg = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+                tg.startTone(ToneGenerator.TONE_PROP_BEEP, 300)
+                if (double) {
+                    Thread.sleep(450)
+                    tg.startTone(ToneGenerator.TONE_PROP_BEEP, 300)
+                }
+                Thread.sleep(500)
+                tg.release()
+            } catch (e: Exception) { }
+        }
+    }
+
     private fun loadBornesCache() {
         var f = bornesFile()
         if (!f.exists()) {
@@ -2331,7 +2476,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.40 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.41 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2352,7 +2497,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.40 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.41 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -3429,7 +3574,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.40 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.41 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
