@@ -2222,22 +2222,32 @@ class MainActivity : Activity() {
         return if (d == 0L) Long.MAX_VALUE else System.currentTimeMillis() - d
     }
 
-    /** v0.41 : charge les radars depuis Download/MG4Link/radars.csv.
-     * Format lufop.net « Zones de danger Europe CSV » : lignes du type
-     * « longitude;latitude;nom;type;vitesse » (l'ordre lon/lat est
-     * détecté automatiquement, séparateur ; ou , accepté). */
+    /** v0.41 : charge les radars depuis Download/MG4Link.
+     * Sources acceptées : soit un fichier unique radars.csv (ou .txt),
+     * soit un dossier Download/MG4Link/radars/ contenant TOUS les fichiers
+     * CSV lufop tels quels (un par pays et par type, ex : ESFixeES90,
+     * FRMobile…) - pas besoin de les fusionner.
+     * Format lufop « Zones de danger Europe CSV » : lignes du type
+     * « longitude;latitude;nom;type;vitesse » (ordre lon/lat détecté
+     * automatiquement, séparateur ; ou , accepté). Les fichiers doivent
+     * être de vrais fichiers .csv (ouverts dans le Bloc-notes, on doit y
+     * voir des chiffres séparés par des points-virgules), PAS des .ods. */
     private fun loadRadars() {
         val dir = publicDir()
-        var f: File? = null
+        val files = ArrayList<File>()
+        val sub = File(dir, "radars")
+        if (sub.isDirectory) {
+            sub.listFiles()?.filter { it.isFile && it.canRead() }?.let { files.addAll(it) }
+        }
         for (n in listOf("radars.csv", "radars.txt", "radars_lufop.csv")) {
             val c = File(dir, n)
-            if (c.isFile && c.canRead()) { f = c; break }
+            if (c.isFile && c.canRead()) files.add(c)
         }
-        if (f == null) {
-            log("Radars : aucun fichier radars.csv dans Download/MG4Link. " +
-                "Téléchargez « Zones de danger Europe CSV » sur lufop.net " +
-                "(inscription gratuite), puis renommez-le radars.csv dans " +
-                "Download/MG4Link.")
+        if (files.isEmpty()) {
+            log("Radars : aucun fichier trouvé. Créez un dossier « radars » " +
+                "dans Download/MG4Link et copiez-y les fichiers CSV de " +
+                "lufop.net (« Zones de danger Europe CSV », inscription " +
+                "gratuite), ou un fichier unique radars.csv.")
             return
         }
         try {
@@ -2245,24 +2255,34 @@ class MainActivity : Activity() {
             val rows = ArrayList<Row>()
             var lonFirst = 0
             var latFirst = 0
-            f.forEachLine { line ->
-                val p = line.split(';', ',').map { it.trim() }
-                if (p.size < 2) return@forEachLine
-                val a = p[0].replace(',', '.').toDoubleOrNull() ?: return@forEachLine
-                val b = p[1].replace(',', '.').toDoubleOrNull() ?: return@forEachLine
-                // Vote sur l'ordre des colonnes : en FR/ES/PT, la latitude
-                // est entre 35 et 55 et la longitude entre -10 et 10 environ.
-                if (a in 35.0..55.0 && b in -10.0..10.0) latFirst++
-                if (b in 35.0..55.0 && a in -10.0..10.0) lonFirst++
-                val name = p.firstOrNull {
-                    it.toDoubleOrNull() == null && it.isNotEmpty()
-                } ?: "Radar"
-                val speed = p.mapNotNull { s -> s.toDoubleOrNull()?.toInt() }
-                    .lastOrNull { it in 10..200 } ?: 0
-                rows.add(Row(a, b, name, speed))
+            var koTotal = 0L
+            val vides = ArrayList<String>()
+            for (f in files) {
+                koTotal += f.length() / 1024
+                var nLus = 0
+                f.forEachLine { line ->
+                    val p = line.split(';', ',').map { it.trim() }
+                    if (p.size < 2) return@forEachLine
+                    val a = p[0].replace(',', '.').toDoubleOrNull() ?: return@forEachLine
+                    val b = p[1].replace(',', '.').toDoubleOrNull() ?: return@forEachLine
+                    // Vote sur l'ordre des colonnes : en FR/ES/PT, la latitude
+                    // est entre 35 et 55 et la longitude entre -10 et 10 environ.
+                    if (a in 35.0..55.0 && b in -10.0..10.0) latFirst++
+                    if (b in 35.0..55.0 && a in -10.0..10.0) lonFirst++
+                    val name = p.firstOrNull {
+                        it.toDoubleOrNull() == null && it.isNotEmpty()
+                    } ?: "Radar"
+                    val speed = p.mapNotNull { s -> s.toDoubleOrNull()?.toInt() }
+                        .lastOrNull { it in 10..200 } ?: 0
+                    rows.add(Row(a, b, name, speed))
+                    nLus++
+                }
+                if (nLus == 0) vides.add(f.name)
             }
             if (rows.isEmpty()) {
-                log("Radars : « " + f.name + " » ne contient aucune ligne exploitable.")
+                log("Radars : " + files.size + " fichier(s) mais aucune ligne " +
+                    "exploitable. Vérifiez que ce sont bien des fichiers CSV " +
+                    "(chiffres séparés par des points-virgules), pas des .ods.")
                 return
             }
             val lonEnPremier = lonFirst >= latFirst
@@ -2280,12 +2300,18 @@ class MainActivity : Activity() {
                 radars.clear()
                 radars.addAll(lst)
             }
-            log("Radars chargés : " + lst.size + " points depuis « " + f.name +
-                " » (" + (f.length() / 1024) + " Ko). Alertes à 5 km puis 2 km.")
+            log("Radars chargés : " + lst.size + " points depuis " + files.size +
+                " fichier(s) (" + koTotal + " Ko). Alertes à 5 km puis 2 km.")
+            if (vides.isNotEmpty()) {
+                log("Radars : fichiers ignorés (aucune ligne exploitable) : " +
+                    vides.take(5).joinToString(", ") +
+                    (if (vides.size > 5) "… (" + vides.size + " au total)" else ""))
+            }
         } catch (e: Exception) {
-            log("Radars : fichier illisible (" + e.message + ").")
+            log("Radars : erreur de lecture (" + e.message + ").")
         }
     }
+
 
     /** v0.41 : alerte radar - bip + ligne « ⚠ » dans la fenêtre flottante,
      * à 5 km puis 2 km avant le radar / zone le plus proche. */
