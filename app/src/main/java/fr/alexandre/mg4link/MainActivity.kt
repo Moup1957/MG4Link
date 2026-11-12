@@ -373,7 +373,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.47 - non connecté"
+        statusTv.text = "MG4 Link v0.48 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -592,7 +592,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.47 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.48 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2457,13 +2457,14 @@ class MainActivity : Activity() {
         }
     }
 
-    /** v0.46 : bip plus fort et plus alertant - volume maximum, double bip
-     * pour l'annonce 5 km, triple salve (répétée toutes les 15 s tant que
-     * la zone est à moins de 2 km) pour l'alerte 2 km. */
+    /** v0.48 : bip sur le flux ALARME (et non MÉDIA) - quand le téléphone
+     * est branché à la voiture (Android Auto / audio USB), le flux média
+     * est capté par la voiture et le bip était inaudible. Le flux alarme
+     * sort toujours sur le téléphone. + vibration de secours. */
     private fun beep(insistant: Boolean) {
         thread(name = "bip-radar") {
             try {
-                val tg = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+                val tg = ToneGenerator(AudioManager.STREAM_ALARM, 100)
                 if (insistant) {
                     for (i in 1..3) {
                         tg.startTone(ToneGenerator.TONE_PROP_BEEP2, 400)
@@ -2478,6 +2479,28 @@ class MainActivity : Activity() {
                 tg.release()
             } catch (e: Exception) { }
         }
+        vibrate(insistant)
+    }
+
+    /** v0.48 : vibration de secours (utile si le son part dans les
+     * haut-parleurs de la voiture ou est couvert par la radio). */
+    private fun vibrate(insistant: Boolean) {
+        try {
+            val vib = if (Build.VERSION.SDK_INT >= 31) {
+                val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
+                vm.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
+            }
+            if (insistant) {
+                vib.vibrate(android.os.VibrationEffect.createWaveform(
+                    longArrayOf(0, 350, 200, 350, 200, 350), -1))
+            } else {
+                vib.vibrate(android.os.VibrationEffect.createOneShot(
+                    300, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+            }
+        } catch (e: Exception) { }
     }
 
     /** v0.42 : site officiel de l'opérateur de la borne (occupation des
@@ -2691,7 +2714,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.47 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.48 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2712,7 +2735,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.47 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.48 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -3805,7 +3828,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.47 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.48 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
@@ -3966,3 +3989,4 @@ else { map.setView([__LAT__, __LON__], 11); }
 document.getElementById('err').style.display = 'none';
 </script></body></html>"""
 }
+
