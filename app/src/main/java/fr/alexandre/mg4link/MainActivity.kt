@@ -289,6 +289,23 @@ class MainActivity : Activity() {
     private var lastRadarLevel = 0
     @Volatile
     private var lastRadarCheck = 0L
+    @Volatile
+    private var lastRadarBeep = 0L
+    // v0.46 : compteur de recharges DC (détection : SOC qui monte vite).
+    @Volatile
+    private var dcCount = 0
+    @Volatile
+    private var dcSoc0 = -1.0
+    @Volatile
+    private var dcT0 = 0L
+    @Volatile
+    private var dcRate = 0.0
+    @Volatile
+    private var dcLastUp = 0L
+    @Volatile
+    private var dcLastSoc = -1.0
+    @Volatile
+    private var dcLastT = 0L
 
     // ------------------------------------------------------------------ UI
 
@@ -356,7 +373,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.45 - non connecté"
+        statusTv.text = "MG4 Link v0.46 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -575,7 +592,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.45 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.46 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -655,6 +672,7 @@ class MainActivity : Activity() {
         ensureStorageAccess()
         thread(name = "bornes-cache") {
             restoreConsoPublic()
+            restoreDc()
             loadBornesCache()
             loadRadars()
         }
@@ -1083,6 +1101,9 @@ class MainActivity : Activity() {
             if (failed == 0) {
                 status("Prêt - dongle connecté")
                 log("Initialisation terminée.")
+                // v0.46 : SOH lu AUTOMATIQUEMENT à la connexion (le bouton
+                // « SOH batterie… » reste disponible pour relire à la main).
+                if (sohPct < 0) readSoh()
             } else {
                 // v0.29 : plus de faux « Initialisation terminée » si des
                 // commandes ont échoué même après la seconde tentative.
@@ -1162,6 +1183,10 @@ class MainActivity : Activity() {
                                 log("Charge : " + "%.1f".format(socPct) + " % (5B brut " +
                                     "%.1f".format(last5bPct) + " %)")
                             }
+                            // v0.46 : détection des recharges DC - le SOC monte
+                            // vite (> 0,8 %/min ; une AC 7 kW reste sous
+                            // ~0,2 %/min sur 61 kWh).
+                            trackDcCharge(socPct)
                         } else {
                             soc = "pas de réponse"
                         }
@@ -1634,8 +1659,73 @@ class MainActivity : Activity() {
         } catch (e: Exception) { }
     }
 
+    /** v0.46 : suit la montée du SOC pour compter les recharges DC.
+     * Une AC 7 kW fait monter le SOC d'au maximum ~0,2 %/min ; au-delà de
+     * 0,8 %/min, c'est de la DC. La session est considérée terminée quand
+     * le SOC n'a plus bougé depuis 5 minutes. Le compteur est affiché dans
+     * le journal et survit aux désinstallations (Download/MG4Link). */
+    private fun trackDcCharge(soc: Double) {
+        val now = System.currentTimeMillis()
+        if (dcLastT > 0L && soc > dcLastSoc + 0.05) {
+            val mins = (now - dcLastT) / 60000.0
+            if (mins > 0.05) {
+                val rate = (soc - dcLastSoc) / mins
+                dcRate = 0.7 * dcRate + 0.3 * rate
+                if (dcSoc0 < 0.0 && dcRate > 0.8) {
+                    dcSoc0 = dcLastSoc
+                    dcT0 = dcLastT
+                    dcLastUp = now
+                    log("Recharge DC détectée (montée " + "%.1f".format(dcRate) + " %/min)…")
+                }
+            }
+        }
+        if (dcSoc0 >= 0.0) {
+            if (soc > dcLastSoc + 0.05) dcLastUp = now
+            if (now - dcLastUp > 5L * 60000L) {
+                dcCount++
+                val mins = (dcLastUp - dcT0) / 60000.0
+                log("Recharge DC n°" + dcCount + " terminée : +" +
+                    "%.0f".format(soc - dcSoc0) + " % en " +
+                    "%.0f".format(mins) + " min.")
+                persistDc()
+                dcSoc0 = -1.0
+                dcRate = 0.0
+            }
+        }
+        dcLastSoc = soc
+        dcLastT = now
+    }
+
+    /** v0.46 : le compteur DC survit aux désinstallations (comme conso.txt). */
+    private fun persistDc() {
+        getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
+            .putInt("dccount", dcCount).apply()
+        try {
+            if (android.os.Environment.isExternalStorageManager()) {
+                val dir = publicDir()
+                dir.mkdirs()
+                File(dir, "dccount.txt").writeText(dcCount.toString())
+            }
+        } catch (e: Exception) { }
+    }
+
+    /** v0.46 : relit le compteur DC (préférences, puis Download/MG4Link). */
+    private fun restoreDc() {
+        val sp = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+        dcCount = sp.getInt("dccount", 0)
+        if (dcCount > 0) {
+            log("Compteur de recharges DC : " + dcCount + ".")
+            return
+        }
+        val v = loadPublicCache("dccount.txt")?.trim()?.toIntOrNull() ?: return
+        if (v in 1..9999) {
+            dcCount = v
+            log("Compteur de recharges DC récupéré depuis Download/MG4Link : " + v + ".")
+            persistDc()
+        }
+    }
+
     /** v0.36 : après une réinstallation, relit la conso sauvegardée dans
-     * Download/MG4Link (préférences internes vides). */
     private fun restoreConsoPublic() {
         try {
             val sp = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
@@ -2039,6 +2129,11 @@ class MainActivity : Activity() {
         sb.append('\n').append("%.2f".format(consoPctPerKm)).append(" %/km")
         // v0.38 : santé de la batterie, affichée dès qu'elle a été lue
         // une fois avec le bouton « SOH batterie… ».
+        // v0.46 : recharge DC en cours (compteur + gain depuis le début).
+        if (dcSoc0 >= 0.0 && socPct >= 0.0) {
+            sb.append('\n').append("⚡ DC +").append("%.0f".format(socPct - dcSoc0))
+                .append(" %")
+        }
         // v0.41 : alerte radar en cours (⚠ + distance), au-dessus du SOH.
         if (radarInfo.isNotEmpty()) {
             sb.append('\n').append(radarInfo)
@@ -2345,22 +2440,35 @@ class MainActivity : Activity() {
         val limite = if (r.speed > 0) " (limite " + r.speed + " km/h)" else ""
         val dist = if (level == 2) "%.1f".format(bestD) + " km" else "%.0f".format(bestD) + " km"
         radarInfo = "⚠ RADAR " + r.name + limite + " - " + dist
+        // v0.46 : bip insistant RÉPÉTÉ toutes les 15 s tant qu'on reste à
+        // moins de 2 km (avant : un seul bip, facile à rater).
         if (level > lastRadarLevel) {
             lastRadarLevel = level
+            lastRadarBeep = now
             log(radarInfo)
             beep(level == 2)
             refreshOverlay()
+        } else if (level == 2 && now - lastRadarBeep > 15000L) {
+            lastRadarBeep = now
+            beep(true)
         }
     }
 
-    /** v0.41 : bip court (double bip pour l'alerte 2 km). */
-    private fun beep(double: Boolean) {
+    /** v0.46 : bip plus fort et plus alertant - volume maximum, double bip
+     * pour l'annonce 5 km, triple salve (répétée toutes les 15 s tant que
+     * la zone est à moins de 2 km) pour l'alerte 2 km. */
+    private fun beep(insistant: Boolean) {
         thread(name = "bip-radar") {
             try {
-                val tg = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
-                tg.startTone(ToneGenerator.TONE_PROP_BEEP, 300)
-                if (double) {
-                    Thread.sleep(450)
+                val tg = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+                if (insistant) {
+                    for (i in 1..3) {
+                        tg.startTone(ToneGenerator.TONE_PROP_BEEP2, 400)
+                        Thread.sleep(750)
+                    }
+                } else {
+                    tg.startTone(ToneGenerator.TONE_PROP_BEEP, 300)
+                    Thread.sleep(250)
                     tg.startTone(ToneGenerator.TONE_PROP_BEEP, 300)
                 }
                 Thread.sleep(500)
@@ -2580,7 +2688,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.45 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.46 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2601,7 +2709,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.45 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.46 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -3694,7 +3802,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.45 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.46 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
