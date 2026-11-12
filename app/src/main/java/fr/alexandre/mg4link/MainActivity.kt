@@ -356,7 +356,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.42 - non connecté"
+        statusTv.text = "MG4 Link v0.44 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -575,7 +575,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.42 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.44 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2388,8 +2388,58 @@ class MainActivity : Activity() {
             e.contains("REPSOL") -> "https://www.repsol.es"
             e.contains("EDP") -> "https://www.edp.pt"
             e.contains("GALP") -> "https://www.galp.com"
+            // v0.43 : opérateurs supplémentaires (retours de test).
+            e.contains("IZIVIA") -> "https://www.izivia.com"
+            e.contains("VIRTY") || e.contains("SODETREL") -> "https://www.virty.fr"
+            e.contains("WENEA") -> "https://wenea.com"
+            e.contains("IBIL") -> "https://ibil.es"
+            e.contains("E-RED") || e.contains("ERED") -> "https://e-red.es"
+            e.contains("FRESHMILE") -> "https://freshmile.com"
+            e.contains("SHELL") -> "https://shellrecharge.com"
+            e.contains("IECHARGE") || e.contains("IE CHARGE") -> "https://iecharge.io"
             else -> null
         }
+    }
+
+    /** v0.44 : paquet Android de l'appli de l'opérateur (null si inconnu).
+     * Si l'appli est installée, « occupation en direct » l'ouvre
+     * directement ; sinon on retombe sur le site web. */
+    private fun operatorPkg(enseigne: String): String? {
+        val e = enseigne.uppercase(Locale.ROOT)
+        return when {
+            e.contains("ZUNDER") -> "es.easycharger.app"
+            e.contains("IONITY") -> "com.cleevio.ionity.android.app"
+            e.contains("ELECTRA") -> "com.electra.app"
+            e.contains("TESLA") -> "com.teslamotors.tesla"
+            e.contains("IZIVIA") -> "com.izivia.izivia"
+            // v0.44b : IECharge (reseau HPC, applis FR/ES/PT).
+            e.contains("IECHARGE") || e.contains("IE CHARGE") -> "com.iecharge"
+            else -> null
+        }
+    }
+
+    /** v0.44 : ouvre l'appli de l'opérateur si installée, sinon son site. */
+    private fun openLive(enseigne: String) {
+        var ok = false
+        val pkg = operatorPkg(enseigne)
+        if (pkg != null) {
+            try {
+                startActivity(packageManager.getLaunchIntentForPackage(pkg))
+                ok = true
+            } catch (e: Exception) { }
+        }
+        if (!ok) {
+            val u = operatorLiveUrl(enseigne)
+            if (u != null) {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u)))
+                    ok = true
+                } catch (e: Exception) {
+                    log("Site opérateur indisponible : " + e.message)
+                }
+            }
+        }
+        if (!ok) log("Pas d'appli ni de site connu pour « " + enseigne + " ».")
     }
 
     private fun loadBornesCache() {
@@ -2525,7 +2575,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.42 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.44 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2546,7 +2596,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.42 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.44 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -3264,11 +3314,7 @@ class MainActivity : Activity() {
             live.text = "Voir l'occupation en direct"
             live.isAllCaps = false
             live.setOnClickListener {
-                try {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(liveUrl)))
-                } catch (e: Exception) {
-                    log("Site opérateur indisponible : " + e.message)
-                }
+                openLive(b.enseigne)
                 dlgRef?.dismiss()
             }
             box.addView(live)
@@ -3643,7 +3689,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.42 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.44 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
@@ -3695,14 +3741,8 @@ class MainActivity : Activity() {
             @JavascriptInterface
             fun openUrl(i: Int) {
                 val n = arr.getOrNull(i) ?: return
-                val u = operatorLiveUrl(n.b.enseigne) ?: return
-                handler.post {
-                    try {
-                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u)))
-                    } catch (e: Exception) {
-                        log("Site opérateur indisponible : " + e.message)
-                    }
-                }
+                // v0.44 : appli de l'opérateur si installée, sinon son site.
+                handler.post { openLive(n.b.enseigne) }
             }
 
             @JavascriptInterface
