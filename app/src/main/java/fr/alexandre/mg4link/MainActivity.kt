@@ -356,7 +356,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.44 - non connecté"
+        statusTv.text = "MG4 Link v0.45 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -575,7 +575,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.44 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.45 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2397,6 +2397,8 @@ class MainActivity : Activity() {
             e.contains("FRESHMILE") -> "https://freshmile.com"
             e.contains("SHELL") -> "https://shellrecharge.com"
             e.contains("IECHARGE") || e.contains("IE CHARGE") -> "https://iecharge.io"
+            e.contains("VIANEO") || e.contains("ENGIE") -> "https://www.engie-vianeo.com"
+            e.contains("ATLANTE") -> "https://atlante.energy"
             else -> null
         }
     }
@@ -2412,6 +2414,9 @@ class MainActivity : Activity() {
             e.contains("ELECTRA") -> "com.electra.app"
             e.contains("TESLA") -> "com.teslamotors.tesla"
             e.contains("IZIVIA") -> "com.izivia.izivia"
+            // v0.45 : Engie Vianeo et Atlante (retours de test).
+            e.contains("VIANEO") || e.contains("ENGIE") -> "com.engie.vianeo"
+            e.contains("ATLANTE") -> "com.atlante.charging"
             // v0.44b : IECharge (reseau HPC, applis FR/ES/PT).
             e.contains("IECHARGE") || e.contains("IE CHARGE") -> "com.iecharge"
             else -> null
@@ -2575,7 +2580,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.44 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.45 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2596,7 +2601,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.44 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.45 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -3689,7 +3694,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.44 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.45 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
