@@ -13,6 +13,21 @@
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
+    <!-- v0.45 : depuis Android 11, une app ne « voit » pas les autres applis
+         sans cette déclaration. Sans elle, getLaunchIntentForPackage
+         renvoyait null et le bouton « occupation en direct » retombait
+         toujours sur le site web au lieu d'ouvrir l'appli opérateur. -->
+    <queries>
+        <package android:name="com.electra.app" />
+        <package android:name="com.cleevio.ionity.android.app" />
+        <package android:name="com.iecharge" />
+        <package android:name="com.engie.vianeo" />
+        <package android:name="com.atlante.charging" />
+        <package android:name="es.easycharger.app" />
+        <package android:name="com.izivia.izivia" />
+        <package android:name="com.teslamotors.tesla" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@drawable/icone_v20"
