@@ -32,6 +32,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
@@ -2370,8 +2372,18 @@ class MainActivity : Activity() {
                     val name = p.firstOrNull {
                         it.toDoubleOrNull() == null && it.isNotEmpty()
                     } ?: "Radar"
-                    val speed = p.mapNotNull { s -> s.toDoubleOrNull()?.toInt() }
-                        .lastOrNull { it in 10..200 } ?: 0
+                    // v0.48 : vitesse = dernier nombre APRÈS les coordonnées
+                    // (avant, la latitude tronquée, ex 47,72 -> 47, était
+                    // prise pour la limite !) et multiple de 10 (30, 50, 70,
+                    // 80, 90, 110, 130). Repli : le nom, qui contient souvent
+                    // la limite (« FR Radar Fixe FR 80 »).
+                    var speed = p.drop(2).mapNotNull { s -> s.toDoubleOrNull()?.toInt() }
+                        .lastOrNull { it in 20..160 && it % 10 == 0 } ?: 0
+                    if (speed == 0) {
+                        speed = Regex("(\\d{2,3})").findAll(name)
+                            .mapNotNull { it.value.toIntOrNull() }
+                            .lastOrNull { it in 20..160 && it % 10 == 0 } ?: 0
+                    }
                     rows.add(Row(a, b, name, speed))
                     nLus++
                 }
@@ -2457,10 +2469,11 @@ class MainActivity : Activity() {
         }
     }
 
-    /** v0.48 : bip sur le flux ALARME (et non MÉDIA) - quand le téléphone
-     * est branché à la voiture (Android Auto / audio USB), le flux média
-     * est capté par la voiture et le bip était inaudible. Le flux alarme
-     * sort toujours sur le téléphone. + vibration de secours. */
+    /** v0.48 : bip sur le flux ALARME + vibration. Avant (STREAM_MUSIC),
+     * le bip était inaudible quand le téléphone était branché au port USB
+     * de la voiture : le mode conduite / Android Auto coupait ou détournait
+     * le flux média. Le flux alarme n'est pas affecté, et la vibration
+     * fonctionne dans tous les cas. */
     private fun beep(insistant: Boolean) {
         thread(name = "bip-radar") {
             try {
@@ -2478,29 +2491,22 @@ class MainActivity : Activity() {
                 Thread.sleep(500)
                 tg.release()
             } catch (e: Exception) { }
+            // Vibration de secours : 3 pulsations (insistant) ou 1 simple.
+            try {
+                val vib = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                    ?: return@thread
+                val motif = if (insistant)
+                    longArrayOf(0, 300, 150, 300, 150, 300)
+                else
+                    longArrayOf(0, 300)
+                if (Build.VERSION.SDK_INT >= 26) {
+                    vib.vibrate(VibrationEffect.createWaveform(motif, -1))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vib.vibrate(motif)
+                }
+            } catch (e: Exception) { }
         }
-        vibrate(insistant)
-    }
-
-    /** v0.48 : vibration de secours (utile si le son part dans les
-     * haut-parleurs de la voiture ou est couvert par la radio). */
-    private fun vibrate(insistant: Boolean) {
-        try {
-            val vib = if (Build.VERSION.SDK_INT >= 31) {
-                val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
-                vm.defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
-            }
-            if (insistant) {
-                vib.vibrate(android.os.VibrationEffect.createWaveform(
-                    longArrayOf(0, 350, 200, 350, 200, 350), -1))
-            } else {
-                vib.vibrate(android.os.VibrationEffect.createOneShot(
-                    300, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
-            }
-        } catch (e: Exception) { }
     }
 
     /** v0.42 : site officiel de l'opérateur de la borne (occupation des
