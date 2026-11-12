@@ -2503,7 +2503,13 @@ class MainActivity : Activity() {
                     vib.vibrate(VibrationEffect.createWaveform(motif, -1))
                 } else {
                     @Suppress("DEPRECATION")
-                    vib.vibrate(motif)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+    vib.vibrate(VibrationEffect.createWaveform(motif, -1))
+} else {
+    @Suppress("DEPRECATION")
+    vib.vibrate(motif)
+}
+
                 }
             } catch (e: Exception) { }
         }
