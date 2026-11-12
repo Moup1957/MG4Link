@@ -356,7 +356,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.41 - non connecté"
+        statusTv.text = "MG4 Link v0.42 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -575,7 +575,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.41 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.42 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -2369,6 +2369,29 @@ class MainActivity : Activity() {
         }
     }
 
+    /** v0.42 : site officiel de l'opérateur de la borne (occupation des
+     * bornes visible dans son app/son site). L'accès direct aux données
+     * temps réel (OCPI) est un service B2B payant - impossible pour une
+     * app personnelle - on renvoie donc vers la source fiable gratuite :
+     * l'opérateur lui-même. Null si l'opérateur est inconnu. */
+    private fun operatorLiveUrl(enseigne: String): String? {
+        val e = enseigne.uppercase(Locale.ROOT)
+        return when {
+            e.contains("ZUNDER") -> "https://zunder.com"
+            e.contains("IONITY") -> "https://ionity.eu"
+            e.contains("ELECTRA") -> "https://go-electra.com"
+            e.contains("FASTNED") -> "https://fastnedcharging.com"
+            e.contains("MOEVE") || e.contains("CEPSA") -> "https://moeve.com"
+            e.contains("TESLA") -> "https://www.tesla.com/fr_FR/findus"
+            e.contains("MOBI.E") -> "https://www.mobie.pt"
+            e.contains("POWERDOT") -> "https://powerdot.com"
+            e.contains("REPSOL") -> "https://www.repsol.es"
+            e.contains("EDP") -> "https://www.edp.pt"
+            e.contains("GALP") -> "https://www.galp.com"
+            else -> null
+        }
+    }
+
     private fun loadBornesCache() {
         var f = bornesFile()
         if (!f.exists()) {
@@ -2502,7 +2525,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = timeoutMs
         conn.readTimeout = timeoutMs
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.41 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.42 (Android; https://github.com/Moup1957/MG4Link)")
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             val sb = StringBuilder()
@@ -2523,7 +2546,7 @@ class MainActivity : Activity() {
         conn.connectTimeout = 30000
         conn.readTimeout = 300000
         conn.instanceFollowRedirects = true
-        conn.setRequestProperty("User-Agent", "MG4Link/0.41 (Android; https://github.com/Moup1957/MG4Link)")
+        conn.setRequestProperty("User-Agent", "MG4Link/0.42 (Android; https://github.com/Moup1957/MG4Link)")
         var count = 0
         try {
             val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
@@ -3232,6 +3255,24 @@ class MainActivity : Activity() {
             dlgRef?.dismiss()
         }
         box.addView(gmaps)
+        // v0.42 : lien vers le site/app de l'opérateur (occupation des
+        // bornes en temps réel - les données OCPI sont B2B payantes, la
+        // source gratuite fiable reste l'opérateur lui-même).
+        val liveUrl = operatorLiveUrl(b.enseigne)
+        if (liveUrl != null) {
+            val live = Button(this)
+            live.text = "Voir l'occupation en direct"
+            live.isAllCaps = false
+            live.setOnClickListener {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(liveUrl)))
+                } catch (e: Exception) {
+                    log("Site opérateur indisponible : " + e.message)
+                }
+                dlgRef?.dismiss()
+            }
+            box.addView(live)
+        }
         val dlg = AlertDialog.Builder(this)
             .setTitle(b.enseigne)
             .setView(box)
@@ -3571,7 +3612,9 @@ class MainActivity : Activity() {
                 .append(",km:").append(String.format(Locale.US, "%.1f", n.km))
                 .append(",kw:").append(String.format(Locale.US, "%.0f", n.b.kw))
                 .append(",nom:\"").append(escapeJs(reseauOf(n.b))).append("\"")
-                .append(",adresse:\"").append(escapeJs(n.b.adresse)).append("\"}")
+                .append(",adresse:\"").append(escapeJs(n.b.adresse)).append("\"")
+                // v0.42 : site de l'opérateur (occupation en direct), vide si inconnu.
+                .append(",site:\"").append(escapeJs(operatorLiveUrl(n.b.enseigne) ?: "")).append("\"}")
         }
         data.append("]")
         // v0.14 : l'itinéraire et la position actuelle sont dessinés sur la carte.
@@ -3600,7 +3643,7 @@ class MainActivity : Activity() {
         // v0.15.5 : identité de l'app pour le serveur de tuiles OpenStreetMap
         // - sans User-Agent identifiable, il répond « 418 Blocked ».
         wv.settings.userAgentString =
-            "MG4Link/0.41 (Android; https://github.com/Moup1957/MG4Link)"
+            "MG4Link/0.42 (Android; https://github.com/Moup1957/MG4Link)"
         // v0.15.4 : la page HTML n'apparaissait JAMAIS dans la boîte (écran
         // vide, même le texte « Chargement de la carte… » était absent) ->
         // suivi du chargement dans le journal pour distinguer un échec de
@@ -3646,6 +3689,19 @@ class MainActivity : Activity() {
                 handler.post {
                     insertBorne(n.b, n.km)
                     dlgRef?.dismiss()
+                }
+            }
+
+            @JavascriptInterface
+            fun openUrl(i: Int) {
+                val n = arr.getOrNull(i) ?: return
+                val u = operatorLiveUrl(n.b.enseigne) ?: return
+                handler.post {
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u)))
+                    } catch (e: Exception) {
+                        log("Site opérateur indisponible : " + e.message)
+                    }
                 }
             }
 
@@ -3727,7 +3783,9 @@ DATA.forEach(function(d, i) {
     '<b>' + d.nom + '</b><br>' + d.kw + ' kW - à ' + d.km + ' km<br>' +
     '<small>' + d.adresse + '</small>' +
     '<br><button style="margin-top:6px" onclick="Android.insertAt(' + i + ')">' +
-    'Insérer comme étape</button>');
+    'Insérer comme étape</button>' +
+    (d.site ? '<br><button style="margin-top:6px" onclick="Android.openUrl(' + i + ')">' +
+    'Occupation en direct</button>' : ''));
   pts.push([d.lat, d.lon]);
 });
 // v0.14 : itinéraire (trait bleu) + position actuelle (point bleu)
