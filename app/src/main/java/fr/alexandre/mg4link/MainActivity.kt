@@ -1726,6 +1726,7 @@ class MainActivity : Activity() {
     }
 
     /** v0.36 : après une réinstallation, relit la conso sauvegardée dans
+     * Download/MG4Link (préférences internes vides). */
     private fun restoreConsoPublic() {
         try {
             val sp = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
