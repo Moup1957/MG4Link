@@ -2502,8 +2502,9 @@ class MainActivity : Activity() {
                 if (Build.VERSION.SDK_INT >= 26) {
                     vib.vibrate(VibrationEffect.createWaveform(motif, -1))
                 } else {
-                    @Suppress("DEPRECATION")
-                    vib.vibrate(motif)
+                    // v0.48b : vibrate(LongArray) supprimé du SDK 36 - on
+                    // garde une vibration simple pour les vieux Android.
+                    vib.vibrate(300L)
                 }
             } catch (e: Exception) { }
         }
@@ -3995,4 +3996,3 @@ else { map.setView([__LAT__, __LON__], 11); }
 document.getElementById('err').style.display = 'none';
 </script></body></html>"""
 }
-
