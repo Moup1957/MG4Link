@@ -281,7 +281,10 @@ class MainActivity : Activity() {
     @Volatile
     private var bornesLoading = false
 
-    // v0.41 : radars / zones de danger (lufop.net, Download/MG4Link/radars.csv)
+    // v0.41 / v0.50 : radars / zones de danger (lufop.net, Download/MG4Link/radars.csv)
+    // Filtrage : autoroutes + nationales uniquement, pas de temporaires/mobiles,
+    // uniquement dans le sens de marche, alertes seulement pendant un trajet actif,
+    // alerte à 2 km max.
     private val radars = ArrayList<Radar>()
     @Volatile
     private var radarInfo = "" // ligne « ⚠ RADAR … » affichée dans la fenêtre flottante
@@ -293,6 +296,10 @@ class MainActivity : Activity() {
     private var lastRadarCheck = 0L
     @Volatile
     private var lastRadarBeep = 0L
+    // Cap (bearing) de la voiture pour filtrer le sens de circulation
+    @Volatile
+    private var currentBearing = -1f
+    private var prevLocForBearing: Location? = null
     // v0.46 : compteur de recharges DC (détection : SOC qui monte vite).
     @Volatile
     private var dcCount = 0
@@ -375,7 +382,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.49 - non connecté"
+        statusTv.text = "MG4 Link v0.50 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -594,7 +601,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.49 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.50 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -816,6 +823,14 @@ class MainActivity : Activity() {
                 val d = prev.distanceTo(loc)
                 if (d < 500f) tripKm += d / 1000.0
             }
+            // Calcul du cap pour filtrer les radars dans le sens de marche
+            val prevB = prevLocForBearing
+            if (prevB != null && loc.distanceTo(prevB) > 25f) {
+                currentBearing = prevB.bearingTo(loc)
+                prevLocForBearing = loc
+            } else if (prevB == null) {
+                prevLocForBearing = loc
+            }
             lastLoc = loc
             gpsInfo = "GPS : " + "%.1f".format(loc.speed * 3.6f) + " km/h  " +
                 "%.5f".format(loc.latitude) + ", " + "%.5f".format(loc.longitude) +
@@ -826,7 +841,7 @@ class MainActivity : Activity() {
             if (stageReached()) finishStage(false)
             refreshRoute()
             refreshOverlay()
-            // v0.41 : alertes radars / zones de danger (5 km puis 2 km).
+            // v0.50 : alertes radars uniquement pendant un trajet, 2 km max, sens de marche
             checkRadars(loc)
         }
 
@@ -2338,16 +2353,19 @@ class MainActivity : Activity() {
         return if (d == 0L) Long.MAX_VALUE else System.currentTimeMillis() - d
     }
 
-    /** v0.41 : charge les radars depuis Download/MG4Link.
+    /** v0.50 : charge les radars depuis Download/MG4Link avec filtrage strict.
      * Sources acceptées : soit un fichier unique radars.csv (ou .txt),
      * soit un dossier Download/MG4Link/radars/ contenant TOUS les fichiers
-     * CSV lufop tels quels (un par pays et par type, ex : ESFixeES90,
-     * FRMobile…) - pas besoin de les fusionner.
+     * CSV lufop tels quels (un par pays et par type).
      * Format lufop « Zones de danger Europe CSV » : lignes du type
      * « longitude;latitude;nom;type;vitesse » (ordre lon/lat détecté
-     * automatiquement, séparateur ; ou , accepté). Les fichiers doivent
-     * être de vrais fichiers .csv (ouverts dans le Bloc-notes, on doit y
-     * voir des chiffres séparés par des points-virgules), PAS des .ods. */
+     * automatiquement, séparateur ; ou , accepté).
+     *
+     * Filtres appliqués au chargement :
+     * - Uniquement autoroutes (Axx) et nationales (Nxx / RN)
+     * - Exclusion des radars temporaires, mobiles, chantiers, travaux
+     * - Coordonnées plausibles France / Espagne / Portugal
+     */
     private fun loadRadars() {
         val dir = publicDir()
         val files = ArrayList<File>()
@@ -2413,21 +2431,56 @@ class MainActivity : Activity() {
             }
             val lonEnPremier = lonFirst >= latFirst
             val lst = ArrayList<Radar>()
+            var excludedTemp = 0
+            var excludedRoad = 0
             for (r in rows) {
                 val lat = if (lonEnPremier) r.b else r.a
                 val lon = if (lonEnPremier) r.a else r.b
-                // Filtre de sécurité : on ne garde que des coordonnées
-                // plausibles (France, Espagne, Portugal et environs).
-                if (lat in 34.0..56.0 && lon in -11.0..17.0) {
-                    lst.add(Radar(lat, lon, r.name, r.speed))
+                // Filtre de sécurité : coordonnées plausibles (France, Espagne, Portugal)
+                if (lat !in 34.0..56.0 || lon !in -11.0..17.0) continue
+
+                val nameUp = r.name.uppercase(Locale.ROOT)
+
+                // 1. Exclure temporaires / mobiles / chantiers / travaux
+                if (nameUp.contains("MOBILE") || nameUp.contains("TEMPORAIRE") ||
+                    nameUp.contains("TEMP.") || nameUp.contains("CHANTIER") ||
+                    nameUp.contains("TRAVAUX") || nameUp.contains("PROVISOIRE") ||
+                    nameUp.contains("EDF") || nameUp.contains("CHANT.") ||
+                    nameUp.contains("TRONÇON") && nameUp.contains("TEMP")) {
+                    excludedTemp++
+                    continue
                 }
+
+                // 2. Ne garder que autoroutes et nationales
+                val isAutoroute = nameUp.contains("AUTOROUTE") ||
+                    Regex("""\bA\d{1,3}\b""").containsMatchIn(nameUp) ||
+                    nameUp.contains(" A ") || nameUp.startsWith("A ") ||
+                    nameUp.contains("AXX") // parfois codé ainsi
+                val isNationale = nameUp.contains("NATIONALE") ||
+                    Regex("""\bN\d{1,4}\b""").containsMatchIn(nameUp) ||
+                    nameUp.contains(" RN") || nameUp.contains("RN ") ||
+                    nameUp.contains(" N ") || nameUp.startsWith("N ") ||
+                    nameUp.contains("ROUTE NATIONALE")
+                // Certains fichiers lufop utilisent "FIXE" + numéro de route dans le nom
+                val looksLikeMajorRoad = isAutoroute || isNationale ||
+                    (nameUp.contains("FIXE") && (nameUp.contains(" A") || nameUp.contains(" N")))
+
+                if (!looksLikeMajorRoad) {
+                    excludedRoad++
+                    continue
+                }
+
+                lst.add(Radar(lat, lon, r.name, r.speed))
             }
             synchronized(radars) {
                 radars.clear()
                 radars.addAll(lst)
             }
-            log("Radars chargés : " + lst.size + " points depuis " + files.size +
-                " fichier(s) (" + koTotal + " Ko). Alertes à 5 km puis 2 km.")
+            log("Radars chargés : " + lst.size + " points (autoroutes/nationales) " +
+                "depuis " + files.size + " fichier(s) (" + koTotal + " Ko). " +
+                "Exclus : " + excludedTemp + " temporaires/mobiles, " +
+                excludedRoad + " autres routes. Alertes à 2 km uniquement, " +
+                "pendant un trajet actif, sens de marche uniquement.")
             if (vides.isNotEmpty()) {
                 log("Radars : fichiers ignorés (aucune ligne exploitable) : " +
                     vides.take(5).joinToString(", ") +
@@ -2439,47 +2492,87 @@ class MainActivity : Activity() {
     }
 
 
-    /** v0.41 : alerte radar - bip + ligne « ⚠ » dans la fenêtre flottante,
-     * à 5 km puis 2 km avant le radar / zone le plus proche. */
+    /** v0.50 : alerte radar - bip + ligne « ⚠ » dans la fenêtre flottante.
+     * - Uniquement si un trajet est démarré (« Démarrer le trajet »)
+     * - Alerte à 2 km maximum (plus de 5 km)
+     * - Uniquement les radars dans le sens de marche (bearing)
+     * - Bip répété toutes les 15 s à moins de 2 km
+     */
     private fun checkRadars(loc: Location) {
+        // Activation uniquement pendant un trajet
+        if (!tripActive) {
+            if (radarInfo.isNotEmpty()) {
+                radarInfo = ""
+                refreshOverlay()
+            }
+            return
+        }
+
         val now = System.currentTimeMillis()
         if (now - lastRadarCheck < 2000L) return
         lastRadarCheck = now
+
         val lst = synchronized(radars) { radars }
-        if (lst.isEmpty()) { radarInfo = ""; return }
-        var best: Radar? = null
-        var bestD = Double.MAX_VALUE
-        for (r in lst) {
-            val d = distKm(loc.latitude, loc.longitude, r.lat, r.lon)
-            if (d < bestD) { bestD = d; best = r }
-        }
-        val r = best ?: return
-        val key = r.lat.toString() + "," + r.lon.toString()
-        if (key != lastRadarKey || bestD > 5.5) {
-            lastRadarKey = key
-            lastRadarLevel = 0
-        }
-        val level = when {
-            bestD <= 2.0 -> 2
-            bestD <= 5.0 -> 1
-            else -> 0
-        }
-        if (level == 0) {
+        if (lst.isEmpty()) {
             radarInfo = ""
             return
         }
+
+        var best: Radar? = null
+        var bestD = Double.MAX_VALUE
+        val bearing = currentBearing
+
+        for (r in lst) {
+            val d = distKm(loc.latitude, loc.longitude, r.lat, r.lon)
+            if (d > 2.5) continue // hors zone d'intérêt
+
+            // Filtre sens de marche : le radar doit être devant (diff de bearing < 75°)
+            if (bearing >= 0f) {
+                val target = Location("radar").apply {
+                    latitude = r.lat
+                    longitude = r.lon
+                }
+                val bearingToRadar = loc.bearingTo(target)
+                var diff = Math.abs(bearingToRadar - bearing)
+                if (diff > 180f) diff = 360f - diff
+                if (diff > 75f) continue // sens opposé ou trop de côté
+            }
+
+            if (d < bestD) {
+                bestD = d
+                best = r
+            }
+        }
+
+        val r = best
+        if (r == null || bestD > 2.0) {
+            if (radarInfo.isNotEmpty()) {
+                radarInfo = ""
+                lastRadarLevel = 0
+                refreshOverlay()
+            }
+            return
+        }
+
+        val key = r.lat.toString() + "," + r.lon.toString()
+        if (key != lastRadarKey || bestD > 2.5) {
+            lastRadarKey = key
+            lastRadarLevel = 0
+        }
+
+        val level = 2 // uniquement le niveau « proche » (≤ 2 km)
         val limite = if (r.speed > 0) " (limite " + r.speed + " km/h)" else ""
-        val dist = if (level == 2) "%.1f".format(bestD) + " km" else "%.0f".format(bestD) + " km"
+        val dist = "%.1f".format(bestD) + " km"
         radarInfo = "⚠ RADAR " + r.name + limite + " - " + dist
-        // v0.46 : bip insistant RÉPÉTÉ toutes les 15 s tant qu'on reste à
-        // moins de 2 km (avant : un seul bip, facile à rater).
+
+        // Bip insistant répété toutes les 15 s tant qu'on reste à moins de 2 km
         if (level > lastRadarLevel) {
             lastRadarLevel = level
             lastRadarBeep = now
             log(radarInfo)
-            beep(level == 2)
+            beep(true)
             refreshOverlay()
-        } else if (level == 2 && now - lastRadarBeep > 15000L) {
+        } else if (now - lastRadarBeep > 15000L) {
             lastRadarBeep = now
             beep(true)
         }
