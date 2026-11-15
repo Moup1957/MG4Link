@@ -382,7 +382,7 @@ class MainActivity : Activity() {
         statusTv.textSize = 17f
         statusTv.typeface = Typeface.DEFAULT_BOLD
         statusTv.setTextColor(Color.WHITE)
-        statusTv.text = "MG4 Link v0.50 - non connecté"
+        statusTv.text = "MG4 Link v0.51 - non connecté"
         root.addView(statusTv)
 
         // v0.18 : l'app est organisée en 4 onglets — Connexion, Itinéraire,
@@ -601,7 +601,7 @@ class MainActivity : Activity() {
         showTab(0)
         setContentView(root)
 
-        log("MG4 Link v0.50 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
+        log("MG4 Link v0.51 démarré (Android ${Build.VERSION.RELEASE}, SDK ${Build.VERSION.SDK_INT})")
         val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
         val savedConso = prefs.getFloat("conso", 0f)
         if (savedConso > 0f) {
@@ -748,6 +748,11 @@ class MainActivity : Activity() {
 
     private fun refreshLive() {
         val autonomie = if (socPct >= 0) "%.0f".format(socPct / consoPctPerKm) + " km" else "?"
+        val radarStatus = when {
+            radars.isEmpty() -> "Radars : base non chargée"
+            tripActive -> "Radars : ACTIF (2 km, sens de marche) — " + radars.size + " points"
+            else -> "Radars : en attente (démarrer le trajet) — " + radars.size + " points"
+        }
         val txt = "Charge : $soc\n" +
             "Autonomie estimée : $autonomie\n" +
             "Odomètre (PID A6) : $odo\n" +
@@ -757,7 +762,8 @@ class MainActivity : Activity() {
             "$gpsInfo\n" +
             "Distance GPS : " + "%.2f".format(tripKm) + " km\n" +
             // v0.47 : compteur de recharges DC (persistant).
-            "Recharges DC : $dcCount"
+            "Recharges DC : $dcCount\n" +
+            radarStatus
         handler.post { liveTv.text = txt }
     }
 
@@ -1870,8 +1876,11 @@ class MainActivity : Activity() {
         }
         if (tripActive) {
             tripActive = false
+            radarInfo = ""
             log("Trajet interrompu.")
             refreshRoute()
+            refreshLive()
+            refreshOverlay()
             return
         }
         tripActive = true
@@ -1907,7 +1916,14 @@ class MainActivity : Activity() {
         }
         log("Trajet démarré : prochaine étape « " + stages[0].name + " » à " +
             "%.0f".format(stages[0].km) + " km.")
+        if (radars.isNotEmpty()) {
+            log("Détection radars ACTIVÉE (" + radars.size + " points, alerte à 2 km, sens de marche).")
+        } else {
+            log("Détection radars : aucune base chargée.")
+        }
         refreshRoute()
+        refreshLive()
+        refreshOverlay()
     }
 
     private fun nextStage() {
@@ -2170,9 +2186,15 @@ class MainActivity : Activity() {
             sb.append('\n').append("⚡ DC +").append("%.0f".format(socPct - dcSoc0))
                 .append(" %")
         }
-        // v0.41 : alerte radar en cours (⚠ + distance), au-dessus du SOH.
+        // v0.50 : statut radar toujours visible + alerte en cours
         if (radarInfo.isNotEmpty()) {
             sb.append('\n').append(radarInfo)
+        } else if (tripActive && radars.isNotEmpty()) {
+            sb.append('\n').append("🛡 Radars ACTIF")
+        } else if (radars.isNotEmpty()) {
+            sb.append('\n').append("🛡 Radars en attente")
+        } else {
+            sb.append('\n').append("🛡 Radars : aucune base")
         }
         if (sohPct > 0) {
             sb.append('\n').append("SOH ").append(String.format(Locale.US, "%.1f", sohPct))
@@ -2485,6 +2507,11 @@ class MainActivity : Activity() {
                 log("Radars : fichiers ignorés (aucune ligne exploitable) : " +
                     vides.take(5).joinToString(", ") +
                     (if (vides.size > 5) "… (" + vides.size + " au total)" else ""))
+            }
+            // Rafraîchir l'affichage du statut radar
+            handler.post {
+                refreshLive()
+                refreshOverlay()
             }
         } catch (e: Exception) {
             log("Radars : erreur de lecture (" + e.message + ").")
