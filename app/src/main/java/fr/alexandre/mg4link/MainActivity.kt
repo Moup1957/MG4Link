@@ -1257,4 +1257,1621 @@ class MainActivity : Activity() {
                         val degr = 100.0 - v
                         log("SOH batterie : " + String.format(Locale.US, "%.1f", v) +
                             " % (dégradation estimée : " +
-                            String.format(Locale.US, "%.1f", degr) +
+                            String.format(Locale.US, "%.1f", degr) + " %).")
+                        sohPct = v
+                        refreshOverlay()
+                        alert("Santé de la batterie (SOH)",
+                            "SOH : " + String.format(Locale.US, "%.1f", v) + " %\n" +
+                                "Dégradation estimée : " +
+                                String.format(Locale.US, "%.1f", degr) + " %\n\n" +
+                                "(PID 22B061, même valeur qu'ABRP : estimation du BMS, " +
+                                "pas un test de capacité en laboratoire.)")
+                        found = true
+                        break
+                    }
+                }
+            }
+            if (!found) {
+                log("SOH : aucune réponse exploitable du calculateur batterie (22B061).")
+                alert("SOH introuvable",
+                    "Le calculateur batterie n'a pas répondu au PID 22B061.\n\n" +
+                        "Réessayez contact mis (bouton Start sans appuyer sur la pédale), " +
+                        "voiture non branchée.")
+            }
+        }
+    }
+
+    private fun testsBatterie() {
+        if (!ready) {
+            log("Dongle pas prêt : connectez-vous d'abord.")
+            return
+        }
+        thread(name = "tests2") {
+            log("> ATH1 (affiche l'adresse de chaque calculateur)\n" + elm.request("ATH1", 3000))
+            val cmds = listOf(
+                "0100", "015B", "015C", "01A6", "0142", "0146", "0149",
+                "0105", "0104", "010C", "010D"
+            )
+            for (c in cmds) {
+                log("> $c\n" + elm.request(c, 8000))
+            }
+            log("> ATH0\n" + elm.request("ATH0", 3000))
+            log("Tests batterie terminés.")
+        }
+    }
+
+    private fun sendManual() {
+        val c = cmdEt.text.toString().trim().uppercase(Locale.ROOT)
+        if (c.isEmpty()) return
+        cmdEt.setText("")
+        thread(name = "cmd") {
+            log("> $c\n" + elm.request(c, 8000))
+        }
+    }
+
+    // ------------------------------------------------------- Itinéraire
+
+    private fun parseStage(line: String): Stage? {
+        val t = line.trim()
+        if (t.isEmpty()) return null
+        val sep = Regex("^(.+?)[;:]\\s*([0-9]+(?:[.,][0-9]+)?)\\s*(km)?\\s*$").find(t)
+        if (sep != null) {
+            val n = sep.groupValues[1].trim().trimEnd(';', ':', ',')
+            val k = sep.groupValues[2].replace(',', '.').toDoubleOrNull() ?: return null
+            if (n.isNotEmpty() && k > 0) return Stage(n, k)
+        }
+        val m = Regex("^(\\D*?)\\s+([0-9]+(?:[.,][0-9]+)?)\\s*(km)\\s*$").find(t)
+        if (m != null) {
+            val n = m.groupValues[1].trim().trimEnd(';', ':', ',')
+            val k = m.groupValues[2].replace(',', '.').toDoubleOrNull() ?: return null
+            if (n.isNotEmpty() && k > 0) return Stage(n, k)
+        }
+        return null
+    }
+
+    private fun editStages() {
+        val input = EditText(this)
+        input.hint = "Une étape par ligne.\nAvec distance : Reims;145\nSans distance (Internet) :\n3 le haut fief 44190 Gorges\n(ville, adresse complète... l'app calcule les km)"
+        input.setSingleLine(false)
+        input.minLines = 6
+        input.gravity = Gravity.TOP
+        input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        input.setText(stages.joinToString("\n") { it.name + ";" + fmtKm(it.km) })
+        AlertDialog.Builder(this)
+            .setTitle("Définir l'itinéraire")
+            .setView(input)
+            .setPositiveButton("OK") { _, _ -> buildStages(input.text.toString()) }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun fmtKm(km: Double): String =
+        if (km % 1.0 == 0.0) "%.0f".format(km) else "%.1f".format(km)
+
+    private fun buildStages(raw: String) {
+        val lines = raw.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.isEmpty()) return
+        val explicit = lines.map { parseStage(it) }
+        if (explicit.all { it != null }) {
+            applyStages(explicit.filterNotNull(), emptyList())
+            return
+        }
+        status("Géocodage des adresses (Internet)...")
+        log("Géocodage de " + lines.size + " ligne(s) via OpenStreetMap...")
+        thread(name = "geocode") {
+            class Pending(val line: String, val explicit: Stage?, val geo: Geo?)
+            val pend = ArrayList<Pending>()
+            val fails = ArrayList<String>()
+            for (line in lines) {
+                val st = parseStage(line)
+                if (st != null) {
+                    pend.add(Pending(line, st, null))
+                    continue
+                }
+                val gf = geocodeFull(line)
+                if (gf == null) {
+                    fails.add(line)
+                    log("Adresse introuvable : " + line)
+                } else {
+                    pend.add(Pending(line, null, gf.first))
+                    log("« " + line + " » localisé → " +
+                        String.format(Locale.US, "%.3f, %.3f", gf.first.lat, gf.first.lon) +
+                        " (" + gf.second + ")")
+                }
+                Thread.sleep(1100)
+            }
+            val here = lastLoc ?: bestLoc()
+            val fresh = here != null && here.time > 0L &&
+                System.currentTimeMillis() - here.time < 10L * 60 * 1000
+            val start = if (fresh) Geo(here!!.latitude, here!!.longitude) else null
+            val result = ArrayList<Stage>()
+            var prev: Geo? = null
+            for (p in pend) {
+                if (p.explicit != null) {
+                    result.add(p.explicit)
+                    continue
+                }
+                val g = p.geo ?: continue
+                val origin = prev ?: start
+                val km = if (origin == null) 0.0 else roadKm(origin, g)
+                result.add(Stage(p.line, km, g.lat, g.lon))
+                if (origin == null) {
+                    log("« " + p.line + " » : distance inconnue pour l'instant " +
+                        "(position pas encore fixée : recalcul au départ du trajet).")
+                } else {
+                    log("« " + p.line + " » : " + fmtKm(km) + " km (distance routière réelle)")
+                }
+                prev = g
+            }
+            handler.post { applyStages(result, fails) }
+        }
+    }
+
+    private fun tryRoadKm(a: Geo, b: Geo): Double? {
+        var lastErr = "pas de réponse"
+        for (essai in 1..2) {
+            try {
+                val url = "https://router.project-osrm.org/route/v1/driving/" +
+                    fmtD(a.lon) + "," + fmtD(a.lat) + ";" + fmtD(b.lon) + "," + fmtD(b.lat) +
+                    "?overview=false"
+                val json = httpGet(url, 12000)
+                val m = Regex("\"distance\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)").find(json)
+                if (m != null) return m.groupValues[1].toDouble() / 1000.0
+                lastErr = "réponse illisible"
+            } catch (e: Exception) {
+                lastErr = e.message ?: "erreur"
+            }
+            if (essai == 1) Thread.sleep(1000)
+        }
+        log("OSRM indisponible (" + lastErr + ") : estimation à vol d'oiseau.")
+        return null
+    }
+
+    private fun roadKm(a: Geo, b: Geo): Double =
+        tryRoadKm(a, b) ?: distKm(a.lat, a.lon, b.lat, b.lon) * 1.35
+
+    private fun applyStages(list: List<Stage>, fails: List<String>) {
+        stages.clear()
+        stages.addAll(list)
+        tripActive = false
+        stageIdx = 0
+        remainKm = -1.0
+        log("Itinéraire : " + stages.size + " étape(s), total " +
+            fmtKm(stages.sumOf { it.km }) + " km" +
+            (if (fails.isNotEmpty()) " (" + fails.size + " adresse(s) ignorée(s))" else ""))
+        refreshRoute()
+        status("Itinéraire : " + stages.size + " étape(s)")
+        if (fails.isNotEmpty()) {
+            alert(
+                "Adresses introuvables (" + fails.size + ")",
+                "Ces lignes n'ont pas été localisées et sont ignorées :\n\n" +
+                    fails.joinToString("\n") +
+                    "\n\nVérifie l'orthographe, ou ajoute la ville / le code postal."
+            )
+        }
+    }
+
+    private fun geocodeFull(addr: String): Pair<Geo, String>? {
+        return try {
+            val url = "https://nominatim.openstreetmap.org/search?format=json&limit=1" +
+                "&countrycodes=fr,es,pt&addressdetails=0&q=" + URLEncoder.encode(addr, "UTF-8")
+            val json = httpGet(url, 15000)
+            val lat = Regex("\"lat\"\\s*:\\s*\"(-?[0-9.]+)\"").find(json)?.groupValues?.get(1)
+                ?: return null
+            val lon = Regex("\"lon\"\\s*:\\s*\"(-?[0-9.]+)\"").find(json)?.groupValues?.get(1)
+                ?: return null
+            val nom = Regex("\"display_name\"\\s*:\\s*\"([^\"]*)\"")
+                .find(json)?.groupValues?.get(1) ?: addr
+            Pair(Geo(lat.toDouble(), lon.toDouble()), nom)
+        } catch (e: Exception) {
+            log("Géocodage de « " + addr + " » : " + e.message)
+            null
+        }
+    }
+
+    private fun geocode(addr: String): Geo? = geocodeFull(addr)?.first
+
+    private fun distKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val r = 6371.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2)
+        return 2 * r * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    }
+
+    private fun parseSaved(line: String): Stage? {
+        val p = line.split(';')
+        if (p.size < 2) return null
+        val km = p[1].replace(',', '.').toDoubleOrNull() ?: return null
+        val lat = if (p.size >= 3) p[2].replace(',', '.').toDoubleOrNull() ?: 0.0 else 0.0
+        val lon = if (p.size >= 4) p[3].replace(',', '.').toDoubleOrNull() ?: 0.0 else 0.0
+        return Stage(p[0], km, lat, lon)
+    }
+
+    // ------------------------------------------------- Itinéraires favoris
+
+    private fun saveItinerary() {
+        if (stages.isEmpty()) {
+            log("Aucun itinéraire à sauvegarder : définissez-le d'abord.")
+            return
+        }
+        val input = EditText(this)
+        input.hint = "Nom de l'itinéraire"
+        AlertDialog.Builder(this)
+            .setTitle("Sauvegarder l'itinéraire")
+            .setView(input)
+            .setPositiveButton("Sauver") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isEmpty()) {
+                    log("Nom vide : itinéraire non sauvegardé.")
+                    return@setPositiveButton
+                }
+                val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+                val data = stages.joinToString("\n") { it.name + ";" + it.km + ";" + it.lat + ";" + it.lon }
+                val names = (prefs.getStringSet("names", null) ?: mutableSetOf()).toMutableSet()
+                names.add(name)
+                prefs.edit()
+                    .putString("it:" + name.lowercase(Locale.ROOT), data)
+                    .putStringSet("names", names)
+                    .apply()
+                log("Itinéraire « " + name + " » sauvegardé (" + stages.size + " étapes).")
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun loadItinerary() {
+        val prefs = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+        val names = ((prefs.getStringSet("names", null) ?: mutableSetOf())).sorted()
+        if (names.isEmpty()) {
+            log("Aucun itinéraire sauvegardé pour l'instant.")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Charger un itinéraire")
+            .setItems(names.toTypedArray()) { _, i ->
+                val data = prefs.getString("it:" + names[i].lowercase(Locale.ROOT), null)
+                if (data != null) {
+                    stages.clear()
+                    for (line in data.lines()) {
+                        val st = parseSaved(line)
+                        if (st != null) stages.add(st)
+                    }
+                    tripActive = false
+                    stageIdx = 0
+                    remainKm = -1.0
+                    log("Itinéraire « " + names[i] + " » chargé (" + stages.size + " étapes, total " +
+                        "%.0f".format(stages.sumOf { it.km }) + " km).")
+                    refreshRoute()
+                } else {
+                    log("Itinéraire « " + names[i] + " illisible.")
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun persistConso() {
+        getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
+            .putFloat("conso", consoPctPerKm.toFloat())
+            .apply()
+        try {
+            if (android.os.Environment.isExternalStorageManager()) {
+                val dir = publicDir()
+                dir.mkdirs()
+                File(dir, "conso.txt").writeText("%.4f".format(consoPctPerKm))
+            }
+        } catch (e: Exception) { }
+    }
+
+    private fun trackDcCharge(soc: Double) {
+        val now = System.currentTimeMillis()
+        if (dcLastT > 0L && soc > dcLastSoc + 0.05) {
+            val mins = (now - dcLastT) / 60000.0
+            if (mins > 0.05) {
+                val rate = (soc - dcLastSoc) / mins
+                dcRate = 0.7 * dcRate + 0.3 * rate
+                if (dcSoc0 < 0.0 && dcRate > 0.8) {
+                    dcSoc0 = dcLastSoc
+                    dcT0 = dcLastT
+                    dcLastUp = now
+                    log("Recharge DC détectée (montée " + "%.1f".format(dcRate) + " %/min)…")
+                }
+            }
+        }
+        if (dcSoc0 >= 0.0) {
+            if (soc > dcLastSoc + 0.05) dcLastUp = now
+            if (now - dcLastUp > 5L * 60000L) {
+                dcCount++
+                val mins = (dcLastUp - dcT0) / 60000.0
+                log("Recharge DC n°" + dcCount + " terminée : +" +
+                    "%.0f".format(soc - dcSoc0) + " % en " +
+                    "%.0f".format(mins) + " min.")
+                persistDc()
+                dcSoc0 = -1.0
+                dcRate = 0.0
+            }
+        }
+        dcLastSoc = soc
+        dcLastT = now
+    }
+
+    private fun persistDc() {
+        getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
+            .putInt("dccount", dcCount).apply()
+        try {
+            if (android.os.Environment.isExternalStorageManager()) {
+                val dir = publicDir()
+                dir.mkdirs()
+                File(dir, "dccount.txt").writeText(dcCount.toString())
+            }
+        } catch (e: Exception) { }
+    }
+
+    private fun restoreDc() {
+        val sp = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+        dcCount = sp.getInt("dccount", 0)
+        if (dcCount > 0) {
+            log("Compteur de recharges DC : " + dcCount + ".")
+            return
+        }
+        val v = loadPublicCache("dccount.txt")?.trim()?.toIntOrNull() ?: return
+        if (v in 1..9999) {
+            dcCount = v
+            log("Compteur de recharges DC récupéré depuis Download/MG4Link : " + v + ".")
+            persistDc()
+        }
+    }
+
+    private fun restoreConsoPublic() {
+        try {
+            val sp = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+            if (sp.getFloat("conso", 0f) > 0f) return
+            val v = loadPublicCache("conso.txt")?.trim()
+                ?.replace(',', '.')?.toDoubleOrNull() ?: return
+            if (v > 0.05 && v < 2.0) {
+                consoPctPerKm = v
+                log("Calibrage récupéré depuis Download/MG4Link : " +
+                    "%.3f".format(v) + " %/km (autonomie à 100 % : " +
+                    "%.0f".format(100.0 / v) + " km)")
+                persistConso()
+            }
+        } catch (e: Exception) { }
+    }
+
+    private fun calibrate() {
+        val input = EditText(this)
+        input.hint = "Autonomie réelle à 100 % (km), ex. 380"
+        input.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        input.setText("%.0f".format(100.0 / consoPctPerKm))
+        AlertDialog.Builder(this)
+            .setTitle("Calibrage de l'autonomie")
+            .setMessage(
+                "Indique l'autonomie que la voiture affiche batterie pleine (100 %).\n" +
+                    "L'app en déduit la consommation en %/km, la mémorise et repartira dessus au démarrage."
+            )
+            .setView(input)
+            .setPositiveButton("OK") { _, _ ->
+                val km = input.text.toString().replace(',', '.').toDoubleOrNull()
+                if (km == null || km < 150.0 || km > 800.0) {
+                    alert("Calibrage", "Valeur invalide : entrez un nombre entre 150 et 800 km.")
+                    return@setPositiveButton
+                }
+                consoPctPerKm = 100.0 / km
+                learnSoc = -1.0
+                persistConso()
+                log("Calibrage : autonomie 100 % = " + "%.0f".format(km) + " km → " +
+                    "%.3f".format(consoPctPerKm) + " %/km (mémorisé).")
+                refreshRoute()
+                refreshLive()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun askSoc() {
+        val input = EditText(this)
+        input.hint = "Pourcentage affiché par la voiture, ex. 58"
+        input.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        AlertDialog.Builder(this)
+            .setTitle("Charge tableau de bord")
+            .setMessage(
+                "Entre le pourcentage de batterie affiché par la voiture maintenant.\n" +
+                    "L'app s'en sert pour les prédictions (la lecture OBD 5B est parfois " +
+                    "fausse sur MG4) et apprend la correction à appliquer au 5B."
+            )
+            .setView(input)
+            .setPositiveButton("OK") { _, _ ->
+                val pct = input.text.toString().replace(',', '.').toDoubleOrNull()
+                if (pct == null || pct < 1.0 || pct > 100.0) {
+                    alert("Charge", "Valeur invalide : entre 1 et 100.")
+                    return@setPositiveButton
+                }
+                socPct = pct
+                soc = "%.1f".format(pct) + " % (tableau de bord)"
+                lastLoggedSoc = pct
+                learnSoc = pct
+                learnKm = tripKm
+                if (last5bPct > 0.0) {
+                    val f = pct / last5bPct
+                    if (f in 0.5..1.5) {
+                        socFactor = 0.7 * socFactor + 0.3 * f
+                        getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
+                            .putFloat("socFactor", socFactor.toFloat())
+                            .apply()
+                        log("Charge tableau de bord : " + "%.1f".format(pct) +
+                            " % (5B brut " + "%.1f".format(last5bPct) +
+                            " %) → facteur de correction ×" + "%.3f".format(socFactor) + " (mémorisé).")
+                    } else {
+                        log("Charge tableau de bord : " + "%.1f".format(pct) +
+                            " % (5B brut " + "%.1f".format(last5bPct) +
+                            " %) : écart trop grand pour corriger automatiquement.")
+                    }
+                } else {
+                    log("Charge tableau de bord : " + "%.1f".format(pct) + " % (pas de lecture 5B).")
+                }
+                refreshLive()
+                refreshRoute()
+                refreshOverlay()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun startTrip() {
+        if (stages.isEmpty()) {
+            log("Définissez d'abord un itinéraire avec le bouton « Itinéraire… ».")
+            return
+        }
+        if (tripActive) {
+            tripActive = false
+            log("Trajet interrompu.")
+            refreshRoute()
+            return
+        }
+        tripActive = true
+        stageIdx = 0
+        stageStartKm = tripKm
+        stageStartSoc = socPct
+        lowWarned = false
+        val st0 = stages[stageIdx]
+        if (st0.hasPos) {
+            val here = lastLoc ?: bestLoc()
+            val fresh = here != null && here.time > 0L &&
+                System.currentTimeMillis() - here.time < 10L * 60 * 1000
+            if (fresh) {
+                val d = tryRoadKm(Geo(here!!.latitude, here!!.longitude), Geo(st0.lat, st0.lon))
+                if (d != null && d > 0.1 &&
+                    (st0.km <= 0.1 || Math.abs(d - st0.km) > 1.0)) {
+                    stages[stageIdx] = Stage(st0.name, d, st0.lat, st0.lon)
+                    log("Distance routière recalculée : « " + st0.name + " » à " +
+                        fmtKm(d) + " km.")
+                } else if (d == null && st0.km <= 0.1) {
+                    log("OSRM indisponible : distance conservée, arrivée détectée par le GPS.")
+                }
+            } else if (st0.km <= 0.1) {
+                log("Position GPS pas encore fixée : distance recalculée en roulant.")
+            }
+        }
+        log("Trajet démarré : prochaine étape « " + stages[0].name + " » à " +
+            "%.0f".format(stages[0].km) + " km.")
+        refreshRoute()
+    }
+
+    private fun nextStage() {
+        if (!tripActive) {
+            log("Aucun trajet en cours : touchez « Démarrer le trajet ».")
+            return
+        }
+        if (stageIdx < stages.size) finishStage(true)
+    }
+
+    private fun stageReached(): Boolean {
+        if (!tripActive || stageIdx >= stages.size) return false
+        val s = stages[stageIdx]
+        val loc = lastLoc
+        return if (s.hasPos && loc != null) {
+            val d = FloatArray(1)
+            Location.distanceBetween(loc.latitude, loc.longitude, s.lat, s.lon, d)
+            d[0] <= 350.0 || (remainKm >= 0.0 && remainKm <= 1.0)
+        } else {
+            (tripKm - stageStartKm) >= s.km
+        }
+    }
+
+    @Synchronized
+    private fun finishStage(manual: Boolean) {
+        if (!tripActive || stageIdx >= stages.size) return
+        val s = stages[stageIdx]
+        val driven = tripKm - stageStartKm
+        val sc = socPct
+        if (sc >= 0 && stageStartSoc >= 0 && driven > 0.5) {
+            val sample = (stageStartSoc - sc) / driven
+            if (sample > 0.02 && sample < 2.0) {
+                consoPctPerKm = 0.7 * consoPctPerKm + 0.3 * sample
+                log("Consommation mesurée : " + "%.3f".format(consoPctPerKm) +
+                    " %/km (sur " + "%.1f".format(driven) + " km)")
+            }
+        }
+        log("Étape « " + s.name + " » " + (if (manual) "validée" else "atteinte") +
+            " : " + "%.1f".format(driven) + " km parcourus, charge " +
+            (if (sc >= 0) "%.1f".format(sc) + " %" else "inconnue"))
+        stageIdx++
+        stageStartKm = tripKm
+        stageStartSoc = sc
+        remainKm = -1.0
+        if (stageIdx >= stages.size) {
+            tripActive = false
+            log("Itinéraire terminé !")
+            status("Itinéraire terminé")
+        }
+        refreshRoute()
+    }
+
+    private fun warnLow() {
+        log("ATTENTION : charge à 15 % ou moins - prévoyez une recharge !")
+        status("Charge basse (15 %)")
+        handler.post {
+            AlertDialog.Builder(this)
+                .setTitle("Charge basse")
+                .setMessage("La batterie est à " + soc + ". Prévoyez une recharge.")
+                .setPositiveButton("Compris", null)
+                .show()
+        }
+    }
+
+    private fun refreshRoute() {
+        if (!this::routeTv.isInitialized) return
+        val sb = StringBuilder()
+        if (stages.isEmpty()) {
+            sb.append("Itinéraire non défini - touchez « Itinéraire… »")
+        } else {
+            sb.append("Conso estimée : ").append("%.2f".format(consoPctPerKm)).append(" %/km\n")
+            val sc = socPct
+            var cum = 0.0
+            for (i in stages.indices) {
+                val s = stages[i]
+                cum += s.km
+                var state = "  "
+                if (i < stageIdx) state = "✓"
+                if (tripActive && i == stageIdx) state = "→"
+                var pred = "?"
+                if (sc >= 0) {
+                    val p = sc - cum * consoPctPerKm
+                    pred = "%.0f".format(p) + " %" + (if (p < 15.0) " !" else "")
+                }
+                sb.append(state).append(' ').append(i + 1).append(". ").append(s.name)
+                    .append(" (").append("%.0f".format(s.km)).append(" km) → ").append(pred).append('\n')
+            }
+            if (tripActive && stageIdx < stages.size) {
+                val remain =
+                    if (stages[stageIdx].hasPos && remainKm >= 0.0) remainKm
+                    else (stages[stageIdx].km - (tripKm - stageStartKm)).coerceAtLeast(0.0)
+                sb.append("Reste " + "%.1f".format(remain) +
+                    " km avant " + stages[stageIdx].name)
+            }
+        }
+        val txt = sb.toString()
+        handler.post { routeTv.text = txt }
+    }
+
+    // ------------------------------------------- Google Maps + fenêtre flottante
+
+    private fun openInMaps() {
+        if (stages.isEmpty()) {
+            log("Définissez d'abord un itinéraire avec le bouton « Itinéraire… ».")
+            return
+        }
+        try {
+            fun wp(s: Stage): String =
+                if (s.hasPos) "${s.lat},${s.lon}" else URLEncoder.encode(s.name, "UTF-8")
+            val dest = wp(stages.last())
+            val wps = stages.dropLast(1).take(9).joinToString("%7C") { wp(it) }
+            val url = "https://www.google.com/maps/dir/?api=1&destination=" + dest +
+                (if (wps.isNotEmpty()) "&waypoints=" + wps else "")
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            log("Itinéraire envoyé à Google Maps (" + stages.size + " étape(s)).")
+        } catch (e: Exception) {
+            log("Impossible d'ouvrir Maps : " + e.message)
+        }
+    }
+
+    private fun toggleOverlay() {
+        if (overlayLayout != null) {
+            hideOverlay()
+            return
+        }
+        if (!Settings.canDrawOverlays(this)) {
+            log("Autorisation manquante : dans les réglages Android, autorisez MG4 Link à " +
+                "« s'afficher par-dessus d'autres applications », puis retouchez le bouton.")
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + packageName))
+                )
+            } catch (e: Exception) {
+                log("Impossible d'ouvrir les réglages : " + e.message)
+            }
+            return
+        }
+        showOverlay()
+    }
+
+    private fun showOverlay() {
+        val layout = LinearLayout(this)
+        layout.orientation = LinearLayout.HORIZONTAL
+        layout.setBackgroundColor(Color.argb(215, 15, 60, 25))
+        val tv = TextView(this)
+        tv.typeface = Typeface.MONOSPACE
+        tv.textSize = 16f
+        tv.setTextColor(Color.WHITE)
+        tv.setPadding(dp(16), dp(12), dp(8), dp(12))
+        val close = Button(this)
+        close.text = "×"
+        close.textSize = 18f
+        close.setPadding(dp(8), 0, dp(8), 0)
+        close.setOnClickListener { hideOverlay() }
+        layout.addView(tv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        layout.addView(close, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        )
+        params.gravity = Gravity.TOP or Gravity.START
+        params.x = dp(10)
+        params.y = dp(120)
+
+        var downX = 0f
+        var downY = 0f
+        var startX = 0
+        var startY = 0
+        layout.setOnTouchListener { _, ev ->
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = ev.rawX
+                    downY = ev.rawY
+                    startX = params.x
+                    startY = params.y
+                    false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val nx = startX + (ev.rawX - downX).toInt()
+                    val ny = startY + (ev.rawY - downY).toInt()
+                    if (Math.abs(nx - params.x) > 4 || Math.abs(ny - params.y) > 4) {
+                        params.x = nx
+                        params.y = ny
+                        wm.updateViewLayout(layout, params)
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+
+        try {
+            wm.addView(layout, params)
+            overlayLayout = layout
+            overlayTv = tv
+            log("Fenêtre flottante affichée - glissez-la pour la déplacer, × pour la fermer.")
+            refreshOverlay()
+        } catch (e: Exception) {
+            log("Fenêtre flottante impossible : " + e.message)
+        }
+    }
+
+    private fun hideOverlay() {
+        val l = overlayLayout
+        if (l != null) {
+            try {
+                wm.removeView(l)
+            } catch (e: Exception) {
+                // rien
+            }
+            overlayLayout = null
+            overlayTv = null
+        }
+    }
+
+    private fun refreshOverlay() {
+        val tv = overlayTv ?: return
+        val sc = socPct
+        val sb = StringBuilder()
+        sb.append("⚡ ").append(if (sc >= 0) "%.1f".format(sc) + " %" else "-- %")
+        if (sc >= 0) {
+            sb.append('\n').append("autonomie ").append("%.0f".format(sc / consoPctPerKm)).append(" km")
+        }
+        if (tripActive && stageIdx < stages.size) {
+            val s = stages[stageIdx]
+            val remain =
+                if (s.hasPos && remainKm >= 0.0) remainKm
+                else (s.km - (tripKm - stageStartKm)).coerceAtLeast(0.0)
+            sb.append('\n').append(s.name)
+            sb.append('\n').append("reste ").append("%.1f".format(remain)).append(" km")
+            if (sc >= 0) {
+                val p = sc - remain * consoPctPerKm
+                sb.append('\n').append("arrivée : ").append("%.0f".format(p)).append(" %")
+            }
+        } else {
+            if (stages.isNotEmpty()) sb.append('\n').append("trajet non démarré")
+        }
+        sb.append('\n').append("%.2f".format(consoPctPerKm)).append(" %/km")
+        if (dcSoc0 >= 0.0 && socPct >= 0.0) {
+            sb.append('\n').append("⚡ DC +").append("%.0f".format(socPct - dcSoc0))
+                .append(" %")
+        }
+        if (radarInfo.isNotEmpty()) {
+            sb.append('\n').append(radarInfo)
+        }
+        if (sohPct > 0) {
+            sb.append('\n').append("SOH ").append(String.format(Locale.US, "%.1f", sohPct))
+                .append(" %")
+        }
+        val txt = sb.toString()
+        handler.post { tv.text = txt }
+    }
+
+    // ------------------------------------------------------ Bornes IRVE v0.7.1 + Dispo v0.51
+
+    private fun bornesFile(): File = File(filesDir, "bornes_cache.txt")
+
+    private fun publicDir(): File = File(
+        android.os.Environment.getExternalStoragePublicDirectory(
+            android.os.Environment.DIRECTORY_DOWNLOADS), "MG4Link")
+
+    private fun ensureStorageAccess() {
+        try {
+            if (Build.VERSION.SDK_INT < 30) return
+            if (android.os.Environment.isExternalStorageManager()) return
+            val sp = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+            if (sp.getBoolean("storageAsked", false)) return
+            sp.edit().putBoolean("storageAsked", true).apply()
+            log("Autorisation « Tous les fichiers » non accordée : les caches " +
+                "du dossier Téléchargements ne survivront pas à une réinstallation.")
+            AlertDialog.Builder(this)
+                .setTitle("Autorisation « Tous les fichiers »")
+                .setMessage("Pour retrouver les caches de bornes (123 000 bornes) " +
+                    "après une réinstallation, l'app doit lire le dossier " +
+                    "Téléchargements.\n\nDans l'écran qui s'ouvre : active « " +
+                    "Autoriser la gestion de tous les fichiers ».\n" +
+                    "(une seule fois, pour toujours)")
+                .setPositiveButton("Ouvrir les réglages") { _, _ ->
+                    try {
+                        startActivity(android.content.Intent(
+                            android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            Uri.parse("package:" + packageName)))
+                    } catch (e: Exception) {
+                        try {
+                            startActivity(android.content.Intent(
+                                android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                        } catch (e2: Exception) {
+                            log("Ouverture des réglages impossible : " + e2.message)
+                        }
+                    }
+                }
+                .setNegativeButton("Plus tard", null)
+                .show()
+        } catch (e: Exception) {
+            log("ensureStorageAccess : " + e.message)
+        }
+    }
+
+    private fun savePublicCache(name: String, text: String) {
+        try {
+            if (android.os.Environment.isExternalStorageManager()) {
+                val dir = publicDir()
+                dir.mkdirs()
+                val base = name.removeSuffix(".txt")
+                dir.listFiles()?.forEach {
+                    if (it.isFile && (it.name == name ||
+                        (it.name.startsWith(base + " (") && it.name.endsWith(".txt")))) {
+                        it.delete()
+                    }
+                }
+                val f = File(dir, name)
+                f.writeText(text)
+                log("Cache public écrit directement : " + f.name + " (" +
+                    (f.length() / 1024) + " Ko).")
+                return
+            }
+        } catch (e: Exception) {
+            log("Écriture directe du cache public : " + e.message)
+        }
+        try {
+            if (Build.VERSION.SDK_INT < 29) return
+            val uri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            val base = name.removeSuffix(".txt")
+            contentResolver.delete(uri,
+                android.provider.MediaStore.MediaColumns.DISPLAY_NAME + " = ? OR " +
+                    android.provider.MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?",
+                arrayOf(name, base + " (%"))
+            val values = android.content.ContentValues()
+            values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+            values.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+            values.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Download/MG4Link")
+            val u = contentResolver.insert(uri, values) ?: return
+            contentResolver.openOutputStream(u)?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+        } catch (e: Exception) {
+            log("Sauvegarde publique impossible : " + e.message)
+        }
+    }
+
+    private fun loadPublicCache(name: String): String? {
+        try {
+            if (android.os.Environment.isExternalStorageManager()) {
+                val dir = publicDir()
+                val base = name.removeSuffix(".txt")
+                var best: File? = null
+                val direct = File(dir, name)
+                if (direct.isFile && direct.canRead()) {
+                    best = direct
+                } else {
+                    best = dir.listFiles()
+                        ?.filter { it.isFile && it.name.startsWith(base + " (") &&
+                            it.name.endsWith(".txt") }
+                        ?.maxByOrNull { it.lastModified() }
+                }
+                if (best != null && best.canRead()) {
+                    log("Cache public « " + best.name + " » lu directement dans " +
+                        "Download/MG4Link (" + (best.length() / 1024) + " Ko).")
+                    return best.readText()
+                }
+                log("Lecture directe : « " + name + " » absent de Download/MG4Link.")
+                return null
+            }
+        } catch (e: Exception) {
+            log("Lecture directe du cache public : " + e.message)
+        }
+        var seen = 0
+        val names = StringBuilder()
+        try {
+            if (Build.VERSION.SDK_INT < 29) return null
+            val uri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            contentResolver.query(uri, arrayOf(
+                android.provider.MediaStore.MediaColumns._ID,
+                android.provider.MediaStore.MediaColumns.DISPLAY_NAME), null, null,
+                android.provider.MediaStore.MediaColumns.DATE_ADDED + " DESC")?.use { c ->
+                val base = name.removeSuffix(".txt")
+                while (c.moveToNext()) {
+                    seen++
+                    val dn = c.getString(1)
+                    if (names.length < 150) names.append(dn).append(" | ")
+                    if (dn == name || (dn.startsWith(base + " (") && dn.endsWith(".txt"))) {
+                        val u = android.content.ContentUris.withAppendedId(uri, c.getLong(0))
+                        return contentResolver.openInputStream(u)
+                            ?.bufferedReader()?.readText()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            log("Lecture du cache public " + name + " impossible : " + e.message)
+        }
+        log("Cache public : « " + name + " » invisible (" + seen +
+            " fichiers visibles dans Download). Aperçu : " + names)
+        return null
+    }
+
+    private fun bornesAgeMs(): Long {
+        val d = getSharedPreferences("mg4link", Context.MODE_PRIVATE).getLong("bornesDate", 0L)
+        return if (d == 0L) Long.MAX_VALUE else System.currentTimeMillis() - d
+    }
+
+    // --------------------------------------------------- Disponibilité IRVE dynamique (v0.51)
+
+    private fun parseIrveDynStatus(etatPdc: String, occPdc: String): DispoStatus {
+        val e = etatPdc.trim().lowercase(Locale.ROOT)
+        val o = occPdc.trim().lowercase(Locale.ROOT)
+        if (e.contains("hors") || e.contains("out") || e.contains("defaut") ||
+            e.contains("défaut") || e.contains("indispo") || e.contains("panne") ||
+            o.contains("hors") || o.contains("out") || o.contains("indispo")) {
+            return DispoStatus.HORS_SERVICE
+        }
+        if (o.contains("libre") || o.contains("free") || o.contains("available") || o.contains("dispo")) {
+            return DispoStatus.LIBRE
+        }
+        if (o.contains("occup") || o.contains("busy") || o.contains("charg") || o.contains("reserv")) {
+            return DispoStatus.OCCUPE
+        }
+        return DispoStatus.INCONNU
+    }
+
+    private fun getBorneDispo(b: Borne): DispoStatus {
+        val matched = ArrayList<DispoStatus>()
+        synchronized(dynByPdcId) {
+            if (dynTotalPdc == 0) return DispoStatus.INCONNU
+            if (b.idPdc.isNotEmpty()) {
+                dynByPdcId[b.idPdc]?.let { matched.add(it) }
+            }
+            if (matched.isEmpty() && b.idStation.isNotEmpty()) {
+                dynByStationId[b.idStation]?.let { matched.addAll(it) }
+            }
+            if (matched.isEmpty() && dynGeoList.isNotEmpty()) {
+                for (dp in dynGeoList) {
+                    if (Math.abs(dp.lat - b.lat) <= 0.001 && Math.abs(dp.lon - b.lon) <= 0.0015) {
+                        if (distKm(b.lat, b.lon, dp.lat, dp.lon) <= 0.08) {
+                            matched.add(dp.status)
+                        }
+                    }
+                }
+            }
+        }
+        val known = matched.filter { it != DispoStatus.INCONNU }
+        if (known.isEmpty()) return DispoStatus.INCONNU
+        if (known.any { it == DispoStatus.LIBRE }) return DispoStatus.LIBRE
+        if (known.any { it == DispoStatus.OCCUPE }) return DispoStatus.OCCUPE
+        return DispoStatus.HORS_SERVICE
+    }
+
+    private fun updateDispoBornes(showDialog: Boolean, onDone: (() -> Unit)?) {
+        if (dispoLoading) {
+            log("Actualisation de la disponibilité déjà en cours...")
+            return
+        }
+        dispoLoading = true
+        status("Dispo bornes : mise à jour...")
+        log("Récupération de la disponibilité IRVE dynamique (France)...")
+        thread(name = "dispo-irve") {
+            try {
+                // v0.51 : ciblage direct de la ressource officielle consolidée dynamique transport.data.gouv.fr
+                val api = "https://transport.data.gouv.fr/datasets/beta-bases-nationales-des-points-de-recharge-pour-vehicules-electriques-en-france-irve"
+                val json = httpGet(api, 25000)
+                val urls = Regex("https:[^\"\\\\]+?\\.csv")
+                    .findAll(json).map { it.value }.toList()
+                    .filter {
+                        it.contains("dynamique", ignoreCase = true) ||
+                            it.contains("dispo", ignoreCase = true)
+                    }
+                val best = urls.firstOrNull() ?: "https://static.transport.data.gouv.fr/resource_cache/datasets/beta-bases-nationales-des-points-de-recharge-pour-vehicules-electriques-en-france-irve/latest.csv"
+
+                val newByPdc = HashMap<String, DispoStatus>()
+                val newByStation = HashMap<String, MutableList<DispoStatus>>()
+                val newGeo = ArrayList<DynPdc>()
+
+                var header: List<String>? = null
+                var sep = ';'
+                var iPdc = -1
+                var iStation = -1
+                var iEtat = -1
+                var iOcc = -1
+                var iCoord = -1
+                var iLat = -1
+                var iLon = -1
+
+                var totalPdc = 0
+                var nbLibre = 0
+                var nbOccupe = 0
+                var nbHs = 0
+
+                downloadCsv(best) { line ->
+                    if (header == null) {
+                        sep = if (line.count { it == ';' } >= line.count { it == ',' }) ';' else ','
+                        header = splitCsvLine(line, sep).map { it.trim().lowercase(Locale.ROOT) }
+                        iPdc = header!!.indexOfFirst { it == "id_pdc_itinerance" || it == "id_pdc" }
+                        iStation = header!!.indexOfFirst { it == "id_station_itinerance" || it == "id_station" }
+                        iEtat = header!!.indexOfFirst { it == "etat_pdc" || it == "etat" }
+                        iOcc = header!!.indexOfFirst { it == "occupation_pdc" || it == "occupation" || it == "statut_pdc" }
+                        iCoord = header!!.indexOf("coordonneesxy")
+                        iLat = header!!.indexOfFirst { it == "lat" || it == "latitude" || it == "consolidated_latitude" }
+                        iLon = header!!.indexOfFirst { it == "lon" || it == "longitude" || it == "consolidated_longitude" }
+                    } else {
+                        val f = splitCsvLine(line, sep)
+                        val etat = if (iEtat >= 0 && f.size > iEtat) f[iEtat] else ""
+                        val occ = if (iOcc >= 0 && f.size > iOcc) f[iOcc] else ""
+                        val st = parseIrveDynStatus(etat, occ)
+                        val pdcId = if (iPdc >= 0 && f.size > iPdc) f[iPdc].trim() else ""
+                        val stId = if (iStation >= 0 && f.size > iStation) f[iStation].trim() else ""
+
+                        var lat = 0.0
+                        var lon = 0.0
+                        if (iCoord >= 0 && f.size > iCoord) {
+                            val ll = parseCoord(f[iCoord])
+                            if (ll != null) {
+                                lat = ll[0]
+                                lon = ll[1]
+                            }
+                        } else if (iLat >= 0 && iLon >= 0 && f.size > iLat && f.size > iLon) {
+                            lat = f[iLat].replace(',', '.').toDoubleOrNull() ?: 0.0
+                            lon = f[iLon].replace(',', '.').toDoubleOrNull() ?: 0.0
+                        }
+
+                        if (pdcId.isNotEmpty() || stId.isNotEmpty() || (lat != 0.0 && lon != 0.0)) {
+                            totalPdc++
+                            when (st) {
+                                DispoStatus.LIBRE -> nbLibre++
+                                DispoStatus.OCCUPE -> nbOccupe++
+                                DispoStatus.HORS_SERVICE -> nbHs++
+                                DispoStatus.INCONNU -> {}
+                            }
+                            if (pdcId.isNotEmpty()) {
+                                newByPdc[pdcId] = st
+                            }
+                            if (stId.isNotEmpty()) {
+                                newByStation.getOrPut(stId) { ArrayList() }.add(st)
+                            }
+                            if (lat != 0.0 && lon != 0.0) {
+                                newGeo.add(DynPdc(pdcId, stId, lat, lon, st))
+                            }
+                        }
+                    }
+                }
+
+                synchronized(dynByPdcId) {
+                    dynByPdcId.clear()
+                    dynByPdcId.putAll(newByPdc)
+                    dynByStationId.clear()
+                    dynByStationId.putAll(newByStation)
+                    dynGeoList.clear()
+                    dynGeoList.addAll(newGeo)
+                    dynTotalPdc = totalPdc
+                    dynLastUpdateMs = System.currentTimeMillis()
+                }
+
+                status("Dispo : $totalPdc PDC")
+                log("Disponibilité bornes mise à jour : $totalPdc PDC (Libre : $nbLibre, Occupé : $nbOccupe, HS : $nbHs).")
+
+                if (showDialog) {
+                    alert(
+                        "Disponibilité bornes",
+                        "$totalPdc points de charge mis à jour (France).\n" +
+                            "Libre : $nbLibre · Occupé : $nbOccupe · HS : $nbHs\n\n" +
+                            "Les bornes sans donnée restent « Inconnu »."
+                    )
+                }
+                if (onDone != null) {
+                    handler.post { onDone() }
+                }
+            } catch (e: Exception) {
+                log("Erreur disponibilité bornes : " + e.message)
+                status("Dispo : erreur réseau")
+                if (showDialog) {
+                    alert(
+                        "Disponibilité bornes",
+                        "Impossible de récupérer la disponibilité en direct : " + e.message +
+                            "\n\nLes bornes sans donnée restent « Inconnu »."
+                    )
+                }
+            } finally {
+                dispoLoading = false
+            }
+        }
+    }
+
+    private fun loadRadars() {
+        val dir = publicDir()
+        val files = ArrayList<File>()
+        val sub = File(dir, "radars")
+        if (sub.isDirectory) {
+            sub.listFiles()?.filter { it.isFile && it.canRead() }?.let { files.addAll(it) }
+        }
+        for (n in listOf("radars.csv", "radars.txt", "radars_lufop.csv")) {
+            val c = File(dir, n)
+            if (c.isFile && c.canRead()) files.add(c)
+        }
+        if (files.isEmpty()) {
+            log("Radars : aucun fichier trouvé. Créez un dossier « radars » " +
+                "dans Download/MG4Link et copiez-y les fichiers CSV de " +
+                "lufop.net (« Zones de danger Europe CSV », inscription " +
+                "gratuite), ou un fichier unique radars.csv.")
+            return
+        }
+        try {
+            class Row(val a: Double, val b: Double, val name: String, val speed: Int)
+            val rows = ArrayList<Row>()
+            var lonFirst = 0
+            var latFirst = 0
+            var koTotal = 0L
+            val vides = ArrayList<String>()
+            for (f in files) {
+                koTotal += f.length() / 1024
+                var nLus = 0
+                f.forEachLine { line ->
+                    val p = line.split(';', ',').map { it.trim() }
+                    if (p.size < 2) return@forEachLine
+                    val a = p[0].replace(',', '.').toDoubleOrNull() ?: return@forEachLine
+                    val b = p[1].replace(',', '.').toDoubleOrNull() ?: return@forEachLine
+                    if (a in 35.0..55.0 && b in -10.0..10.0) latFirst++
+                    if (b in 35.0..55.0 && a in -10.0..10.0) lonFirst++
+                    val name = p.firstOrNull {
+                        it.toDoubleOrNull() == null && it.isNotEmpty()
+                    } ?: "Radar"
+                    var speed = p.drop(2).mapNotNull { s -> s.toDoubleOrNull()?.toInt() }
+                        .lastOrNull { it in 20..160 && it % 10 == 0 } ?: 0
+                    if (speed == 0) {
+                        speed = Regex("(\\d{2,3})").findAll(name)
+                            .mapNotNull { it.value.toIntOrNull() }
+                            .lastOrNull { it in 20..160 && it % 10 == 0 } ?: 0
+                    }
+                    rows.add(Row(a, b, name, speed))
+                    nLus++
+                }
+                if (nLus == 0) vides.add(f.name)
+            }
+            if (rows.isEmpty()) {
+                log("Radars : " + files.size + " fichier(s) mais aucune ligne " +
+                    "exploitable. Vérifiez que ce sont bien des fichiers CSV " +
+                    "(chiffres séparés par des points-virgules), pas des .ods.")
+                return
+            }
+            val lonEnPremier = lonFirst >= latFirst
+            val lst = ArrayList<Radar>()
+            for (r in rows) {
+                val lat = if (lonEnPremier) r.b else r.a
+                val lon = if (lonEnPremier) r.a else r.b
+                if (lat in 34.0..56.0 && lon in -11.0..17.0) {
+                    lst.add(Radar(lat, lon, r.name, r.speed))
+                }
+            }
+            synchronized(radars) {
+                radars.clear()
+                radars.addAll(lst)
+            }
+            log("Radars chargés : " + lst.size + " points depuis " + files.size +
+                " fichier(s) (" + koTotal + " Ko). Alertes à 5 km puis 2 km.")
+            if (vides.isNotEmpty()) {
+                log("Radars : fichiers ignorés (aucune ligne exploitable) : " +
+                    vides.take(5).joinToString(", ") +
+                    (if (vides.size > 5) "… (" + vides.size + " au total)" else ""))
+            }
+        } catch (e: Exception) {
+            log("Radars : erreur de lecture (" + e.message + ").")
+        }
+    }
+
+    private fun checkRadars(loc: Location) {
+        val now = System.currentTimeMillis()
+        if (now - lastRadarCheck < 2000L) return
+        lastRadarCheck = now
+        val lst = synchronized(radars) { radars }
+        if (lst.isEmpty()) { radarInfo = ""; return }
+        var best: Radar? = null
+        var bestD = Double.MAX_VALUE
+        for (r in lst) {
+            val d = distKm(loc.latitude, loc.longitude, r.lat, r.lon)
+            if (d < bestD) { bestD = d; best = r }
+        }
+        val r = best ?: return
+        val key = r.lat.toString() + "," + r.lon.toString()
+        if (key != lastRadarKey || bestD > 5.5) {
+            lastRadarKey = key
+            lastRadarLevel = 0
+        }
+        val level = when {
+            bestD <= 2.0 -> 2
+            bestD <= 5.0 -> 1
+            else -> 0
+        }
+        if (level == 0) {
+            radarInfo = ""
+            return
+        }
+        val limite = if (r.speed > 0) " (limite " + r.speed + " km/h)" else ""
+        val dist = if (level == 2) "%.1f".format(bestD) + " km" else "%.0f".format(bestD) + " km"
+        radarInfo = "⚠ RADAR " + r.name + limite + " - " + dist
+        if (level > lastRadarLevel) {
+            lastRadarLevel = level
+            lastRadarBeep = now
+            log(radarInfo)
+            beep(level == 2)
+            refreshOverlay()
+        } else if (level == 2 && now - lastRadarBeep > 15000L) {
+            lastRadarBeep = now
+            beep(true)
+        }
+    }
+
+    private fun beep(insistant: Boolean) {
+        thread(name = "bip-radar") {
+            try {
+                val tg = ToneGenerator(AudioManager.STREAM_ALARM, 100)
+                if (insistant) {
+                    for (i in 1..3) {
+                        tg.startTone(ToneGenerator.TONE_PROP_BEEP2, 400)
+                        Thread.sleep(750)
+                    }
+                } else {
+                    tg.startTone(ToneGenerator.TONE_PROP_BEEP, 300)
+                    Thread.sleep(250)
+                    tg.startTone(ToneGenerator.TONE_PROP_BEEP, 300)
+                }
+                Thread.sleep(500)
+                tg.release()
+            } catch (e: Exception) { }
+            try {
+                val vib = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                    ?: return@thread
+                val motif = if (insistant)
+                    longArrayOf(0, 300, 150, 300, 150, 300)
+                else
+                    longArrayOf(0, 300)
+                if (Build.VERSION.SDK_INT >= 26) {
+                    vib.vibrate(VibrationEffect.createWaveform(motif, -1))
+                } else {
+                    vib.vibrate(300L)
+                }
+            } catch (e: Exception) { }
+        }
+    }
+
+    private fun operatorLiveUrl(enseigne: String): String? {
+        val e = enseigne.uppercase(Locale.ROOT)
+        return when {
+            e.contains("ZUNDER") -> "https://zunder.com"
+            e.contains("IONITY") -> "https://ionity.eu"
+            e.contains("ELECTRA") -> "https://go-electra.com"
+            e.contains("FASTNED") -> "https://fastnedcharging.com"
+            e.contains("MOEVE") || e.contains("CEPSA") -> "https://moeve.com"
+            e.contains("TESLA") -> "https://www.tesla.com/fr_FR/findus"
+            e.contains("MOBI.E") -> "https://www.mobie.pt"
+            e.contains("POWERDOT") -> "https://powerdot.com"
+            e.contains("REPSOL") -> "https://www.repsol.es"
+            e.contains("EDP") -> "https://www.edp.pt"
+            e.contains("GALP") -> "https://www.galp.com"
+            e.contains("IZIVIA") -> "https://www.izivia.com"
+            e.contains("VIRTY") || e.contains("SODETREL") -> "https://www.virty.fr"
+            e.contains("WENEA") -> "https://wenea.com"
+            e.contains("IBIL") -> "https://ibil.es"
+            e.contains("E-RED") || e.contains("ERED") -> "https://e-red.es"
+            e.contains("FRESHMILE") -> "https://freshmile.com"
+            e.contains("SHELL") -> "https://shellrecharge.com"
+            e.contains("IECHARGE") || e.contains("IE CHARGE") -> "https://iecharge.io"
+            e.contains("VIANEO") || e.contains("ENGIE") -> "https://www.engie-vianeo.com"
+            e.contains("ATLANTE") -> "https://atlante.energy"
+            else -> null
+        }
+    }
+
+    private fun operatorPkg(enseigne: String): String? {
+        val e = enseigne.uppercase(Locale.ROOT)
+        return when {
+            e.contains("ZUNDER") -> "es.easycharger.app"
+            e.contains("IONITY") -> "com.cleevio.ionity.android.app"
+            e.contains("ELECTRA") -> "com.electra.app"
+            e.contains("TESLA") -> "com.teslamotors.tesla"
+            e.contains("IZIVIA") -> "com.izivia.izivia"
+            e.contains("VIANEO") || e.contains("ENGIE") -> "com.engie.vianeo"
+            e.contains("ATLANTE") -> "com.atlante.charging"
+            e.contains("IECHARGE") || e.contains("IE CHARGE") -> "com.iecharge"
+            else -> null
+        }
+    }
+
+    private fun openLive(enseigne: String) {
+        var ok = false
+        val pkg = operatorPkg(enseigne)
+        if (pkg != null) {
+            try {
+                startActivity(packageManager.getLaunchIntentForPackage(pkg))
+                ok = true
+            } catch (e: Exception) { }
+        }
+        if (!ok) {
+            val u = operatorLiveUrl(enseigne)
+            if (u != null) {
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u)))
+                    ok = true
+                } catch (e: Exception) {
+                    log("Site opérateur indisponible : " + e.message)
+                }
+            }
+        }
+        if (!ok) log("Pas d'appli ni de site connu pour « " + enseigne + " ».")
+    }
+
+    private fun loadBornesCache() {
+        var f = bornesFile()
+        if (!f.exists()) {
+            var public = loadPublicCache("bornes_cache.txt")
+            var essai = 1
+            while (public == null && essai < 5) {
+                try { Thread.sleep(5000L) } catch (e: InterruptedException) { return }
+                log("Cache des bornes : nouvel essai (" + (essai + 1) + "/5)...")
+                public = loadPublicCache("bornes_cache.txt")
+                essai++
+            }
+            if (public != null) try { f.writeText(public) } catch (e: Exception) { }
+        }
+        if (!f.exists()) return
+        try {
+            val lst = ArrayList<Borne>()
+            f.forEachLine { line -> parseBorneCache(line)?.let { lst.add(it) } }
+            if (lst.isNotEmpty()) {
+                synchronized(bornes) {
+                    bornes.clear()
+                    bornes.addAll(lst)
+                }
+                val ageH = bornesAgeMs() / 3600000L
+                log("Base IRVE France en cache : " + lst.size + " bornes" +
+                    (if (ageH > 100000L) " (date de mise à jour inconnue)." else
+                        " (maj il y a " + ageH + " h)."))
+            }
+            loadBornesIberia()
+        } catch (e: Exception) {
+            log("Cache IRVE illisible : " + e.message)
+        }
+    }
+
+    private fun parseBorneCache(line: String): Borne? {
+        val p = line.split(';')
+        if (p.size < 5) return null
+        val lat = p[0].toDoubleOrNull() ?: return null
+        val lon = p[1].toDoubleOrNull() ?: return null
+        val kw = p[2].toDoubleOrNull() ?: return null
+        val idStation = if (p.size >= 6) p[5] else ""
+        val idPdc = if (p.size >= 7) p[6] else ""
+        return Borne(lat, lon, kw, p[3], p[3], p[4], idStation, idPdc)
+    }
+
+    private fun bornesIberiaFile(): File = File(filesDir, "bornes_iberia2.txt")
+
+    private fun loadBornesIberia() {
+        var f = bornesIberiaFile()
+        if (!f.exists()) {
+            val public = loadPublicCache("bornes_iberia2.txt")
+            if (public != null) try { f.writeText(public) } catch (e: Exception) { }
+        }
+        if (!f.exists()) {
+            log("Cache Espagne/Portugal introuvable (interne et dossier Download).")
+            return
+        }
+        try {
+            val lst = ArrayList<Borne>()
+            f.forEachLine { line -> parseBorneCache(line)?.let { lst.add(it) } }
+            if (lst.isNotEmpty()) {
+                synchronized(bornes) { bornes.addAll(lst) }
+                log("Bornes Espagne/Portugal en cache : " + lst.size)
+            }
+        } catch (e: Exception) {
+            log("Cache Espagne/Portugal illisible : " + e.message)
+        }
+    }
+
+    private fun splitCsvLine(line: String, sep: Char): List<String> {
+        val out = ArrayList<String>()
+        val cur = StringBuilder()
+        var inQ = false
+        var i = 0
+        while (i < line.length) {
+            val ch = line[i]
+            if (inQ) {
+                if (ch == '"') {
+                    if (i + 1 < line.length && line[i + 1] == '"') {
+                        cur.append('"')
+                        i++
+                    } else {
+                        inQ = false
+                    }
+                } else {
+                    cur.append(ch)
+                }
+            } else {
+                when (ch) {
+                    '"' -> inQ = true
+                    sep -> {
+                        out.add(cur.toString())
+                        cur.setLength(0)
+                    }
+                    else -> cur.append(ch)
+                }
+            }
+            i++
+        }
+        out.add(cur.toString())
+        return out
+    }
+
+    private fun parseCoord(s: String): DoubleArray? {
+        val t = s.replace("[", "").replace("]", "").trim()
+        val parts = t.split(',')
+        if (parts.size < 2) return null
+        val lon = parts[0].trim().toDoubleOrNull() ?: return null
+        val lat = parts[1].trim().toDoubleOrNull() ?: return null
+        return doubleArrayOf(lat, lon)
+    }
+
+    private fun httpGet(urlStr: String, timeoutMs: Int): String {
+        val conn = URL(urlStr).openConnection() as HttpURLConnection
+        conn.connectTimeout = timeoutMs
+        conn.readTimeout = timeoutMs
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty("User-Agent", "MG4Link/0.51 (Android; https://github.com/Moup1957/MG4Link)")
+        try {
+            val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
+            val sb = StringBuilder()
+            var line = reader.readLine()
+            while (line != null) {
+                sb.append(line)
+                line = reader.readLine()
+            }
+            reader.close()
+            return sb.toString()
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun downloadCsv(urlStr: String, onLine: (String) -> Unit): Int {
+        val conn = URL(urlStr).openConnection() as HttpURLConnection
+        conn.connectTimeout = 30000
+        conn.readTimeout = 300000
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty("User-Agent", "MG4Link/0.51 (Android; https://github.com/Moup1957/MG4Link)")
+        var count = 0
+        try {
+            val reader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
+            var line = reader.readLine()
+            while (line != null) {
+                onLine(line)
+                count++
+                line = reader.readLine()
+            }
+            reader.close()
+        } finally {
+            conn.disconnect()
+        }
+        return count
+    }
+
+    private fun updateBornes(force: Boolean) {
+        if (bornesLoading) {
+            log("Téléchargement des bornes déjà en cours, patientez...")
+            return
+        }
+        if (!force && bornes.isNotEmpty() && bornesAgeMs() < 7L * 24L * 3600L * 1000L) {
+            log("Base des bornes déjà à jour.")
+            return
+        }
+        bornesLoading = true
+        log("Mise à jour de la base IRVE France (Wi-Fi conseillé, 1 à 2 min)...")
+        thread(name = "bornes-dl") {
+            try {
+                val prefsX = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+                val frRecent = bornesFile().exists() &&
+                    System.currentTimeMillis() - prefsX.getLong("bornesDate", 0L) <
+                    7L * 24L * 3600L * 1000L
+                val esF = findEsXmlFile()
+                if (frRecent && esF != null &&
+                    esF.lastModified() > prefsX.getLong("iberiaDate", 0L)) {
+                    log("Fichier espagnol officiel détecté - import direct " +
+                        "(base France conservée depuis le cache).")
+                    synchronized(bornes) { bornes.clear() }
+                    bornesFile().forEachLine { line ->
+                        parseBorneCache(line)?.let { b ->
+                            synchronized(bornes) { bornes.add(b) }
+                        }
+                    }
+                    log("France : " + bornes.size + " bornes rechargées depuis le cache.")
+                    updateBornesIberia()
+                    log("Base complète chargée : " + bornes.size +
+                        " bornes (France en cache + Espagne + Portugal).")
+                    return@thread
+                }
+                val api = "https://www.data.gouv.fr/api/1/datasets/" +
+                    "base-nationale-des-irve-data-gouv-infrastructures-de-recharge-pour-vehicules-electriques-donnees-statiques/"
+                val json = httpGet(api, 30000)
+                val urls = Regex("https:[^\"\\\\]+?\\.csv")
+                    .findAll(json).map { it.value }.toList()
+                    .filter { it.contains("consolidation-etalab-schema-irve-statique") }
+                if (urls.isEmpty()) {
+                    log("ERREUR : URL de la base IRVE introuvable - réessayez plus tard.")
+                    alert("Bornes", "URL de la base IRVE introuvable. Réessayez plus tard.")
+                    return@thread
+                }
+                val best = urls.maxByOrNull { Regex("(\\d{8})").find(it)?.groupValues?.get(1) ?: "0" }!!
+                log("Fichier source : " + best.substringAfterLast('/'))
+
+                val parsed = ArrayList<Borne>()
+                var header: List<String>? = null
+                var sep = ';'
+                var iCoord = -1
+                var iKw = -1
+                var iOper = -1
+                var iEnseigne = -1
+                var iNom = -1
+                var iAdr = -1
+                var iStationId = -1
+                var iPdcId = -1
+                val out = StringBuilder()
+                var n = 0
+                downloadCsv(best) { line ->
+                    if (header == null) {
+                        sep = if (line.count { it == ';' } >= line.count { it == ',' }) ';' else ','
+                        header = splitCsvLine(line, sep)
+                        iCoord = header!!.indexOf("coordonneesXY")
+                        iKw = header!!.indexOf("puissance_nominale")
+                        if (iKw < 0) iKw = header!!.indexOf("puissance_max")
+                        iOper = header!!.indexOf("nom_operateur")
+                        iEnseigne = header!!.indexOf("nom_enseigne")
+                        iNom = header!!.indexOf("nom_station")
+                        iAdr = header!!.indexOf("adresse_station")
+                        iStationId = header!!.indexOf("id_station_itinerance")
+                        iPdcId = header!!.indexOf("id_pdc_itinerance")
+                        if (iCoord < 0 || iKw < 0) {
+                            log("Colonnes IRVE introuvables ! En-tête reçu (300 premiers caractères) : " +
+                                line.take(300))
+                        } else {
+                            log("Colonnes IRVE : coordonnees=$iCoord puissance=$iKw (" +
+                                header!![iKw] + ") opérateur=$iOper enseigne=$iEnseigne")
+                        }
+                    } else if (iCoord >= 0 && iKw >= 0) {
+                        val f = splitCsvLine(line, sep)
+                        if (f.size > iCoord && f.size > iKw) {
+                            val ll = parseCoord(f[iCoord])
+                            val kw = f[iKw].replace(',', '.').toDoubleOrNull() ?: 0.0
+                            if (ll != null && kw >= 22.0) {
+                                val enseigne = when {
+                                    iOper >= 0 && f.size > iOper && f[iOper].isNotEmpty() -> f[iOper]
+                                    iEnseigne >= 0 && f.size > iEnseigne && f[iEnseigne].isNotEmpty() -> f[iEnseigne]
+                                    else -> "Opérateur ?"
+                                }
+                                val nom = if (iNom >= 0 && f.size > iNom) f[iNom] else ""
+                                val adr = if (iAdr >= 0 && f.size > iAdr && f[iAdr].isNotEmpty()) f[iAdr] else nom
+                                val stId = if (iStationId >= 0 && f.size > iStationId) f[iStationId].trim() else ""
+                                val pdcId = if (iPdcId >= 0 && f.size > iPdcId) f[iPdcId].trim() else ""
+                                parsed.add(Borne(ll[0], ll[1], kw, enseigne, nom, adr, stId, pdcId))
+                                out.append(ll[0]).append(';').append(ll[1]).append(';')
+                                    .append(kw).append(';')
+                                    .append(enseigne.replace(';', ' ')).append(';')
+                                    .append(adr.replace(';', ' ')).append(';')
+                                    .append(stId.replace(';', ' ')).append(';')
+                                    .append(pdcId.replace(';', ' ')).append('\n')
+                            }
+                        }
+                    }
+                    n++
+                    if (n % 50000 == 0) log("Téléchargement IRVE : " + n + " lignes lues...")
+                }
+                synchronized(bornes) {
+                    bornes.clear()
+                    bornes.addAll(parsed)
+                }
+                bornesFile().writeText(out.toString())
+                savePublicCache("bornes_cache.txt", out.toString())
+                getSharedPreferences("mg4link", Context.MODE_PRIVATE).edit()
+                    .putLong("bornesDate", System.currentTimeMillis())
+                    .apply()
+                log("Base IRVE France chargée : " + bornes.size + " bornes ≥ 22 kW (" + n + " lignes).")
+                val prefsB = getSharedPreferences("mg4link", Context.MODE_PRIVATE)
+                val iAge = System.currentTimeMillis() - prefsB.getLong("iberiaDate", 0L)
+                val esXmlF = findEsXmlFile()
+                val xmlNouveau = esXmlF != null &&
+                    esXmlF.lastModified() > prefsB.getLong("iberiaDate", 0L)
+                if (iAge in 1 until 7L * 24 * 3600 * 1000 && !xmlNouveau) {
+                    log("Bornes Espagne/Portugal : cache de moins de 7 jours, pas de retéléchargement.")
+                } else {
+                    updateBornesIberia()
+                }
+                log("Base complète chargée : " + bornes.size + " bornes (France + Espagne + Portugal).")
+                if (bornes.isEmpty()) {
+                    alert("Bornes", "La base a été téléchargée mais aucune borne ≥ 22 kW n'a été trouvée. " +
+                        "Copiez le journal et envoyez-le pour diagnostic.")
+                }
+            } catch (e: Exception) {
+                log("Erreur base IRVE : " + e.message)
+                alert("Bornes", "Erreur pendant le téléchargement : " + e.message)
+            } finally {
+                bornesLoading = false
+            }
+        }
+    }
+
+    private fun findEsXmlFile(): File? {
+        try {
+            val files = publicDir().listFiles()?.filter {
+                it.isFile && it.name.endsWith(".xml", ignoreCase = true) &&
+                    it.name.contains("nstalaciones", ignoreCase = true)
+            } ?: return null
+            return files.maxByOrNull { it.lastModified() }
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    private fun importEsXml(out: StringBuilder): Int {
+        val f
