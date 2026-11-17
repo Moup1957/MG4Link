@@ -3471,4 +3471,367 @@ class MainActivity : Activity() {
         val counts = LinkedHashMap<String, Int>()
         synchronized(bornes) {
             for (b in bornes) {
-                if (b.
+                if (b.kw < minKw) continue
+                val d = FloatArray(1)
+                Location.distanceBetween(loc.latitude, loc.longitude, b.lat, b.lon, d)
+                if (d[0] / 1000.0 > radiusKm) continue
+                val op = operateurOf(b)
+                counts[op] = (counts[op] ?: 0) + 1
+            }
+        }
+        return counts.entries.sortedByDescending { it.value }.take(12).map { it.key }
+    }
+
+    private fun escapeJs(s: String): String =
+        s.replace("\\", "\\\\").replace("\"", "\\\"").replace("'", "\\'")
+            .replace("\n", " ").replace("\r", " ").replace("<", "‹")
+
+    private fun showBornesMap() {
+        if (bornes.isEmpty()) {
+            alert("Bornes", "La base des bornes est vide : touchez d'abord « Mettre à jour bornes ».")
+            return
+        }
+        val nextStage = stages.getOrNull(if (tripActive) stageIdx else 0)
+        val here = lastLoc ?: bestLoc()
+        fun pickOperator(center: Location, zoneLabel: String, radiusKm: Double,
+                         minKw: Double) {
+            val ops = topOperateurs(center, radiusKm, minKw)
+            val labels = ArrayList<String>()
+            labels.add("Tous les opérateurs (" + ops.size + " réseaux)")
+            labels.addAll(ops)
+            AlertDialog.Builder(this)
+                .setTitle("Réseau / opérateur ?")
+                .setItems(labels.toTypedArray()) { _, i ->
+                    openBornesMap(minKw, center, radiusKm, zoneLabel,
+                        if (i == 0) null else labels[i])
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+        fun pickPower(center: Location, zoneLabel: String, radiusKm: Double) {
+            val filtres = arrayOf("Toutes (≥ 22 kW)", "≥ 50 kW", "≥ 100 kW", "≥ 150 kW")
+            AlertDialog.Builder(this)
+                .setTitle("Puissance minimale ?")
+                .setItems(filtres) { _, i ->
+                    val minKw = when (i) {
+                        1 -> 50.0
+                        2 -> 100.0
+                        3 -> 150.0
+                        else -> 22.0
+                    }
+                    pickOperator(center, zoneLabel, radiusKm, minKw)
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+        fun pickRadius(center: Location, zoneLabel: String) {
+            AlertDialog.Builder(this)
+                .setTitle("Rayon de recherche (" + zoneLabel + ")")
+                .setItems(arrayOf("5 km", "10 km", "25 km", "50 km")) { _, i ->
+                    val r = when (i) {
+                        1 -> 10.0
+                        2 -> 25.0
+                        3 -> 50.0
+                        else -> 5.0
+                    }
+                    pickPower(center, zoneLabel, r)
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+        if (nextStage != null && nextStage.hasPos) {
+            val opts = ArrayList<String>()
+            if (here != null) opts.add("Autour de ma position")
+            opts.add("Autour de « " + nextStage.name.take(30) + " »")
+            opts.add("Autour d'un lieu (ville, code postal…)")
+            AlertDialog.Builder(this)
+                .setTitle("Bornes autour de quoi ?")
+                .setItems(opts.toTypedArray()) { _, i ->
+                    if (i == 0 && here != null) {
+                        pickRadius(here, "autour de moi")
+                    } else if (i == opts.size - 1) {
+                        choosePlace { c, l -> pickRadius(c, l) }
+                    } else {
+                        val c = Location("stage")
+                        c.latitude = nextStage.lat
+                        c.longitude = nextStage.lon
+                        pickRadius(c, "autour de « " + nextStage.name.take(30) + " »")
+                    }
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        } else if (here != null) {
+            AlertDialog.Builder(this)
+                .setTitle("Bornes autour de quoi ?")
+                .setItems(arrayOf("Autour de ma position",
+                    "Autour d'un lieu (ville, code postal…)")) { _, i ->
+                    if (i == 0) pickRadius(here, "autour de moi")
+                    else choosePlace { c, l -> pickRadius(c, l) }
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        } else {
+            val et = EditText(this)
+            et.hint = "Ex : Gorges 44, Super U 44190 Gétigné…"
+            et.setSingleLine()
+            AlertDialog.Builder(this)
+                .setTitle("Autour de quel lieu ?")
+                .setMessage("Aucune position GPS disponible pour l'instant " +
+                    "(normal à l'intérieur). Saisissez un lieu, idéalement avec son " +
+                    "code postal ou son département (ex : Gorges 44) :")
+                .setView(et)
+                .setPositiveButton("Rechercher") { _, _ ->
+                    val q = et.text.toString().trim()
+                    if (q.isEmpty()) return@setPositiveButton
+                    status("Recherche du lieu…")
+                    thread(name = "geocode-borne") {
+                        val gf = geocodeFull(q)
+                        handler.post {
+                            status("")
+                            if (gf == null) {
+                                log("Lieu introuvable : « " + q + " ».")
+                                alert("Lieu introuvable",
+                                    "OpenStreetMap n'a pas trouvé « " + q + " ».")
+                            } else {
+                                val g = gf.first
+                                val nom = gf.second
+                                log("« " + q + " » localisé → " +
+                                    String.format(Locale.US, "%.3f, %.3f", g.lat, g.lon) +
+                                    " (" + nom + ")")
+                                val c = Location("lieu")
+                                c.latitude = g.lat
+                                c.longitude = g.lon
+                                AlertDialog.Builder(this)
+                                    .setTitle("C'est bien ce lieu ?")
+                                    .setMessage(nom + "\n\n" +
+                                        String.format(Locale.US, "%.3f, %.3f", g.lat, g.lon) +
+                                        "\n\nContinuer avec ce lieu ?")
+                                    .setPositiveButton("Continuer") { _, _ ->
+                                        pickRadius(c, "autour de « " + q.take(30) + " »")
+                                    }
+                                    .setNegativeButton("Annuler", null)
+                                    .show()
+                            }
+                        }
+                    }
+                }
+                .setNegativeButton("Annuler", null)
+                .show()
+        }
+    }
+
+    private fun openBornesMap(minKw: Double, loc: Location, radiusKm: Double, zoneLabel: String,
+                              operateur: String? = null) {
+        class NearB(val b: Borne, val km: Double)
+        val arr: List<NearB> = synchronized(bornes) {
+            bornes.filter { it.kw >= minKw &&
+                (operateur == null ||
+                    (it.enseigne + " " + it.nom).contains(operateur, true)) }
+                .map { b ->
+                    val d = FloatArray(1)
+                    Location.distanceBetween(loc.latitude, loc.longitude, b.lat, b.lon, d)
+                    NearB(b, d[0] / 1000.0)
+                }
+                .filter { it.km <= radiusKm }
+                .sortedBy { it.km }
+                .distinctBy { it.b.enseigne.trim().lowercase() + "|" +
+                    it.b.adresse.trim().lowercase() }
+                .take(150)
+        }
+        if (arr.isEmpty()) {
+            log("Carte : aucune borne ≥ " + "%.0f".format(minKw) + " kW à moins de " +
+                "%.0f".format(radiusKm) + " km " + zoneLabel + ".")
+            alert("Bornes", "Aucune borne ≥ " + "%.0f".format(minKw) +
+                " kW à moins de " + "%.0f".format(radiusKm) + " km " + zoneLabel + ".")
+            return
+        }
+        val data = StringBuilder("[")
+        for (i in arr.indices) {
+            val n = arr[i]
+            val dispo = getBorneDispo(n.b)
+            if (i > 0) data.append(",")
+            data.append("{lat:").append(fmtD(n.b.lat))
+                .append(",lon:").append(fmtD(n.b.lon))
+                .append(",km:").append(String.format(Locale.US, "%.1f", n.km))
+                .append(",kw:").append(String.format(Locale.US, "%.0f", n.b.kw))
+                .append(",nom:\"").append(escapeJs(reseauOf(n.b))).append("\"")
+                .append(",adresse:\"").append(escapeJs(n.b.adresse)).append("\"")
+                .append(",dispo:\"").append(escapeJs(dispo.dot + " " + dispo.label)).append("\"")
+                .append(",col:\"").append(dispo.hex).append("\"")
+                .append(",site:\"").append(escapeJs(operatorLiveUrl(n.b.enseigne) ?: "")).append("\"}")
+        }
+        data.append("]")
+        val route = StringBuilder("[")
+        var firstPt = true
+        for (s in stages) {
+            if (s.hasPos) {
+                if (!firstPt) route.append(",")
+                firstPt = false
+                route.append("[").append(fmtD(s.lat)).append(",").append(fmtD(s.lon)).append("]")
+            }
+        }
+        route.append("]")
+        val me = lastLoc
+        val meJs = if (me != null) "[" + fmtD(me.latitude) + "," + fmtD(me.longitude) + "]" else "null"
+        val html = MAP_HTML
+            .replace("__DATA__", data.toString())
+            .replace("__ROUTE__", route.toString())
+            .replace("__ME__", meJs)
+            .replace("__LAT__", fmtD(loc.latitude))
+            .replace("__LON__", fmtD(loc.longitude))
+        var dlgRef: android.app.Dialog? = null
+        val wv = WebView(this)
+        wv.settings.javaScriptEnabled = true
+        wv.settings.domStorageEnabled = true
+        wv.settings.userAgentString =
+            "MG4Link/0.51 (Android; https://github.com/Moup1957/MG4Link)"
+        wv.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(
+                view: WebView?,
+                url: String?,
+                favicon: android.graphics.Bitmap?
+            ) {
+                log("Carte : page en cours de chargement (" + (url ?: "?") + ").")
+            }
+
+            override fun onPageFinished(
+                view: WebView?,
+                url: String?
+            ) {
+                log("Carte : page chargée, rendu en cours.")
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: android.webkit.WebResourceRequest?,
+                error: android.webkit.WebResourceError?
+            ) {
+                try {
+                    log("Carte : ressource en échec : " + error?.description +
+                        " (" + request?.url + ")")
+                } catch (e: Exception) { }
+            }
+        }
+        wv.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(cm: ConsoleMessage): Boolean {
+                log("Carte JS : " + cm.message() + " (" + cm.sourceId() + ":" +
+                    cm.lineNumber() + ")")
+                return true
+            }
+        }
+        wv.addJavascriptInterface(object {
+            @JavascriptInterface
+            fun insertAt(i: Int) {
+                val n = arr.getOrNull(i) ?: return
+                handler.post {
+                    insertBorne(n.b, n.km)
+                    dlgRef?.dismiss()
+                }
+            }
+
+            @JavascriptInterface
+            fun openUrl(i: Int) {
+                val n = arr.getOrNull(i) ?: return
+                handler.post { openLive(n.b.enseigne) }
+            }
+
+            @JavascriptInterface
+            fun jsErr(msg: String) {
+                log("Erreur carte JS : " + msg)
+            }
+        }, "Android")
+        val dlg = android.app.Dialog(this)
+        dlg.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        val title = TextView(this)
+        title.text = "Bornes ≥ " + "%.0f".format(minKw) + " kW" +
+            (operateur?.let { " - " + it } ?: "") + ", " + arr.size + " affichées"
+        title.textSize = 17f
+        title.typeface = Typeface.DEFAULT_BOLD
+        title.setPadding(dp(14), dp(12), dp(14), dp(6))
+        box.addView(title)
+        box.addView(wv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(440)))
+        val close = Button(this)
+        close.text = "Fermer"
+        close.setOnClickListener { dlg.dismiss() }
+        box.addView(close)
+        dlgRef = dlg
+        dlg.setContentView(box)
+        dlg.show()
+        try {
+            dlg.window?.setLayout(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT)
+        } catch (e: Exception) { }
+        log("Carte : envoi de la page (" + html.length + " caractères)...")
+        wv.loadDataWithBaseURL("https://openstreetmap.org/", html, "text/html", "utf-8", null)
+        log("Carte des bornes ouverte : " + arr.size + " bornes ≥ " +
+            "%.0f".format(minKw) + " kW à moins de " + "%.0f".format(radiusKm) +
+            " km " + zoneLabel + ".")
+    }
+
+    private val MAP_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>html,body{margin:0;padding:0;height:100%;font-family:sans-serif}
+#map{height:100%}.lg{position:absolute;right:8px;bottom:8px;z-index:1000;background:#fff;
+padding:6px 8px;border:1px solid #888;border-radius:6px;font-size:11px;line-height:1.6}
+.dot{display:inline-block;width:10px;height:10px;border-radius:5px;margin-right:4px}
+#err{position:absolute;left:8px;top:8px;z-index:1000;background:#fff;
+padding:6px 8px;border:1px solid #888;border-radius:6px;font-size:12px}</style>
+</head><body><div id="map"></div>
+<div id="err">Chargement de la carte…</div>
+<div class="lg" id="lg"></div>
+<script>
+window.onerror = function(m) { Android.jsErr('' + m); return true; };
+var DATA = __DATA__;
+var STATES = [
+  ["Libre", "#2e7d32"],
+  ["Occupé", "#f57c00"],
+  ["Hors service", "#d32f2f"],
+  ["Inconnu", "#9e9e9e"]
+];
+var map = L.map('map');
+var base = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+ {maxZoom:19, attribution:'&copy; Esri, OpenStreetMap'});
+base.addTo(map);
+var pts = [];
+DATA.forEach(function(d, i) {
+  var col = d.col || '#9e9e9e';
+  var m = L.circleMarker([d.lat, d.lon],
+    {radius:9, color:'#000', weight:1, fillColor:col, fillOpacity:0.95}).addTo(map);
+  m.bindPopup(
+    '<b>' + d.nom + '</b><br>' + d.kw + ' kW - à ' + d.km + ' km<br>' +
+    'Dispo : <b>' + d.dispo + '</b><br>' +
+    '<small>' + d.adresse + '</small>' +
+    '<br><button style="margin-top:6px" onclick="Android.insertAt(' + i + ')">' +
+    'Insérer comme étape</button>' +
+    (d.site ? '<br><button style="margin-top:6px" onclick="Android.openUrl(' + i + ')">' +
+    'Occupation en direct</button>': ''));
+  pts.push([d.lat, d.lon]);
+});
+var ROUTE = __ROUTE__;
+if (ROUTE.length > 1) {
+  L.polyline(ROUTE, {color: '#0b57d0', weight: 4, opacity: 0.75}).addTo(map);
+  ROUTE.forEach(function(p) { pts.push(p); });
+}
+var ME = __ME__;
+if (ME) {
+  L.circleMarker(ME, {radius: 11, color: '#fff', weight: 3,
+    fillColor: '#1a73e8', fillOpacity: 1}).addTo(map).bindPopup('Vous êtes ici');
+  pts.push(ME);
+}
+var lg = document.getElementById('lg');
+var h = '';
+for (var t = 0; t < STATES.length; t++) { h += '<div><span class="dot" style="background:' +
+  STATES[t][1] + '"></span>' + STATES[t][0] + '</div>'; }
+lg.innerHTML = h;
+if (pts.length) { map.fitBounds(pts, {padding: [25, 25]}); }
+else { map.setView([__LAT__, __LON__], 11); }
+document.getElementById('err').style.display = 'none';
+</script></body></html>"""
+}
