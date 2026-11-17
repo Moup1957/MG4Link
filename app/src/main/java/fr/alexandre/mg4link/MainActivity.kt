@@ -2218,11 +2218,8 @@ class MainActivity : Activity() {
         log("Récupération de la disponibilité IRVE dynamique (France)...")
         thread(name = "dispo-irve") {
             try {
-                val api = "https://www.data.gouv.fr/api/1/datasets/base-nationale-des-irve-data-gouv-infrastructures-de-recharge-pour-vehicules-electriques-donnees-dynamiques/"
-                val json = httpGet(api, 25000)
-                val urls = Regex("https:[^\"\\\\]+?\\.csv")
-                    .findAll(json).map { it.value }.toList()
-                val best = urls.firstOrNull() ?: "https://diffuseur.developpement-durable.gouv.fr/adhoc/IRVE/dynamique/latest.csv"
+                // Utilisation directe du lien de téléchargement direct officiel de data.gouv.fr pour les données dynamiques IRVE
+                val best = "https://diffuseur.developpement-durable.gouv.fr/adhoc/IRVE/dynamique/latest.csv"
 
                 val newByPdc = HashMap<String, DispoStatus>()
                 val newByStation = HashMap<String, MutableList<DispoStatus>>()
